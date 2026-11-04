@@ -1,0 +1,28 @@
+# Testing only. Single-node OpenShift on AWS, built by Hive from ocp-hub-1.
+revision: main
+hub: ocp-hub-1
+version: 4.20.8
+channel: stable-4.20
+valueFiles:
+  - environments/nonprod.yaml
+  - platforms/aws.yaml
+install:
+  baseDomain: sandbox1230.opentlc.com
+  hive:
+    platform:
+      aws:
+        region: us-east-2
+    # Lists replace whole, so both pools are restated: one control-plane node, no workers.
+    # m6i.2xlarge (8 vCPU, 32 GiB) is the smallest type that meets the single-node minimum.
+    installConfig:
+      controlPlane:
+        name: master
+        architecture: amd64
+        replicas: 1
+        platform:
+          aws:
+            type: m6i.2xlarge
+      compute:
+        - name: worker
+          architecture: amd64
+          replicas: 0
