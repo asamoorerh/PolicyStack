@@ -4,34 +4,19 @@
 # remediations (samples) and dns. Storage comes from the hub's existing default StorageClass.
 #
 # Before the first sync:
-#   - Replace the MetalLB placeholder range below with free IPs on the node network.
-#   - Create the KubeVirt credential the hosted cluster reads (docs/lifecycle.md, KubeVirt).
+#   - Create the AWS credential Hive builds aws-sno-1 with (docs/lifecycle.md, hive).
 #   - Once central-central-ready is Compliant, generate the ACS CRS (docs/acs.md).
 stack:
-  # Hosted control planes for hcp-kubevirt-1: workers run as VMs here, the hosted API server is a
-  # LoadBalancer Service.
+  # OpenShift Virtualization and the Migration Toolkit. Virtualization needs bare metal or nested
+  # virtualization on the hub nodes.
   virtualization:
     enabled: true
-  metallb:
-    enabled: true
-    policies:
-      addressing:
-        enabled: true
-    config:
-      ipAddressPools:
-        hcp-api:
-          addresses:
-            - 192.0.2.10-192.0.2.20 # PLACEHOLDER
-      l2Advertisements:
-        hcp-api:
-          ipAddressPools:
-            - hcp-api
-
-  # Migration Toolkit, paired with Virtualization.
   mtv:
     enabled: true
 
-  # Operator only: NodeNetworkConfigurationPolicies need per-host interfaces.
+  # Operators only: address pools and NodeNetworkConfigurationPolicies are network specific.
+  metallb:
+    enabled: true
   nmstate:
     enabled: true
 

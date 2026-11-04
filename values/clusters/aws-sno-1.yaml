@@ -1,0 +1,37 @@
+# Testing only: aws-sno-1, single-node OpenShift on AWS that ocp-hub-1 builds with Hive
+# (fleet/aws-sno-1.yaml). Kept light for one node; the default StorageClass is AWS EBS gp3.
+stack:
+  certManager:
+    enabled: true
+  eso:
+    enabled: true
+  remediations:
+    enabled: true
+    policies:
+      samples:
+        enabled: true
+  dns:
+    enabled: true
+
+  # Hive installs only; version and channel in the fleet file drive upgrades here.
+  upgrade:
+    enabled: true
+
+  # Registers with Central on ocp-hub-1 using the CRS the hub copies over.
+  acs:
+    enabled: true
+    policies:
+      secured:
+        enabled: true
+
+  userMonitoring:
+    enabled: true
+  coo:
+    enabled: true
+  logging:
+    enabled: true
+  pipelines:
+    enabled: true
+
+# Off on purpose: node elements (one node, nothing to split), machineHealth (no worker MachineSets),
+# compliance (STIG node scans and remediations are heavy for one node).
