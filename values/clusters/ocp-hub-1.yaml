@@ -1,0 +1,90 @@
+# Testing only: ocp-hub-1, the ACM hub. Broad policy-library 4.0 coverage without ODF.
+#
+# environments/prod.yaml (fleet/hubs/ocp-hub-1.yaml) already enables certManager, eso, compliance,
+# remediations (samples) and dns. Storage comes from the hub's existing default StorageClass.
+#
+# Before the first sync:
+#   - Replace the MetalLB placeholder range below with free IPs on the node network.
+#   - Create the KubeVirt credential the hosted cluster reads (docs/lifecycle.md, KubeVirt).
+#   - Once central-central-ready is Compliant, generate the ACS CRS (docs/acs.md).
+stack:
+  # Hosted control planes for hcp-kubevirt-1: workers run as VMs here, the hosted API server is a
+  # LoadBalancer Service.
+  virtualization:
+    enabled: true
+  metallb:
+    enabled: true
+    policies:
+      addressing:
+        enabled: true
+    config:
+      ipAddressPools:
+        hcp-api:
+          addresses:
+            - 192.0.2.10-192.0.2.20 # PLACEHOLDER
+      l2Advertisements:
+        hcp-api:
+          ipAddressPools:
+            - hcp-api
+
+  # Migration Toolkit, paired with Virtualization.
+  mtv:
+    enabled: true
+
+  # Operator only: NodeNetworkConfigurationPolicies need per-host interfaces.
+  nmstate:
+    enabled: true
+
+  nfd:
+    enabled: true
+  nodeMaintenance:
+    enabled: true
+
+  # Central plus the hub's own secured cluster. secured stays NonCompliant until the CRS exists.
+  acs:
+    enabled: true
+    policies:
+      central:
+        enabled: true
+      secured:
+        enabled: true
+
+  # Metrics and logging. Loki is off: it needs object storage.
+  userMonitoring:
+    enabled: true
+  coo:
+    enabled: true
+  logging:
+    enabled: true
+
+  # Service Mesh 3 in ambient mode with Kiali and OpenTelemetry. tracing is off: Tempo's backend
+  # waits on odf.
+  servicemesh:
+    enabled: true
+  kiali:
+    enabled: true
+  opentelemetry:
+    enabled: true
+  tempo:
+    enabled: true
+  ambientMesh:
+    enabled: true
+
+  # Developer tooling, operators only.
+  pipelines:
+    enabled: true
+  devSpaces:
+    enabled: true
+  developerHub:
+    enabled: true
+  artifactSigner:
+    enabled: true
+
+# Off on purpose:
+#   odf, storageNodes, localStorage, lvm, loki, imageRegistry s3, acm observability, aap storage,
+#   quay: need ODF or object storage.
+#   acm, gitops, teamGitops: this hub's ACM and Argo CD deliver PolicyStack (docs/install.md).
+#   masterNodes, workerNodes, infraNodes, partitioning, machineHealth: platform specific or reboot
+#   nodes.
+#   upgrade: the hub fleet file sets no version or channel.
+#   cim, disconnected: nothing to build or mirror.

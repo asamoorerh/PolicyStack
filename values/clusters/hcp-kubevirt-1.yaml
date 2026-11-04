@@ -1,0 +1,35 @@
+# Testing only: hcp-kubevirt-1, a hosted cluster ocp-hub-1 builds on KubeVirt
+# (fleet/hcp-kubevirt-1.yaml, platforms/kubevirt.yaml: 2 workers).
+#
+# Hosted clusters have no MachineConfigs or MachineSets, so the node elements stay off. The guest's
+# default StorageClass comes from KubeVirt CSI.
+stack:
+  certManager:
+    enabled: true
+  eso:
+    enabled: true
+  remediations:
+    enabled: true
+    policies:
+      samples:
+        enabled: true
+  dns:
+    enabled: true
+
+  # Registers with Central on ocp-hub-1 using the CRS the hub copies over.
+  acs:
+    enabled: true
+    policies:
+      secured:
+        enabled: true
+
+  userMonitoring:
+    enabled: true
+  coo:
+    enabled: true
+  logging:
+    enabled: true
+  nfd:
+    enabled: true
+  pipelines:
+    enabled: true
