@@ -1,0 +1,26 @@
+stack:
+  dns:
+    enabled: false
+
+    config:
+      # Tolerations for the DNS daemonset. The default tolerates every taint so that
+      # workloads on infra, storage and master nodes keep cluster DNS.
+      tolerations:
+        - operator: Exists
+
+    default:
+      remediationAction: enforce
+      severity: medium
+      categories:
+        - CM Configuration Management
+      controls:
+        - CM-2 Baseline Configuration
+      standards:
+        - NIST SP 800-53
+
+    policies:
+      config:
+        description: "Cluster DNS node placement"
+        templates:
+          tolerations:
+            description: "DNS daemonset tolerations"
