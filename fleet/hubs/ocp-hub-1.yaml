@@ -1,0 +1,4 @@
+# Testing only. The hub's install sets hubName: ocp-hub-1.
+revision: main
+valueFiles:
+  - environments/prod.yaml

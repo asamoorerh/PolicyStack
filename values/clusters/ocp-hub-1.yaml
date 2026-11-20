@@ -1,0 +1,75 @@
+# Testing only: ocp-hub-1, the ACM hub. Broad policy-library 4.0 coverage without ODF.
+#
+# environments/prod.yaml (fleet/hubs/ocp-hub-1.yaml) already enables certManager, eso, compliance,
+# remediations (samples) and dns. Storage comes from the hub's existing default StorageClass.
+#
+# Before the first sync:
+#   - Create the AWS credential Hive builds aws-sno-1 with (docs/lifecycle.md, hive).
+#   - Once central-central-ready is Compliant, generate the ACS CRS (docs/acs.md).
+stack:
+  # OpenShift Virtualization and the Migration Toolkit. Virtualization needs bare metal or nested
+  # virtualization on the hub nodes.
+  virtualization:
+    enabled: true
+  mtv:
+    enabled: true
+
+  # Operators only: address pools and NodeNetworkConfigurationPolicies are network specific.
+  metallb:
+    enabled: true
+  nmstate:
+    enabled: true
+
+  nfd:
+    enabled: true
+  nodeMaintenance:
+    enabled: true
+
+  # Central plus the hub's own secured cluster. secured stays NonCompliant until the CRS exists.
+  acs:
+    enabled: true
+    policies:
+      central:
+        enabled: true
+      secured:
+        enabled: true
+
+  # Metrics and logging. Loki is off: it needs object storage.
+  userMonitoring:
+    enabled: true
+  coo:
+    enabled: true
+  logging:
+    enabled: true
+
+  # Service Mesh 3 in ambient mode with Kiali and OpenTelemetry. tracing is off: Tempo's backend
+  # waits on odf.
+  servicemesh:
+    enabled: true
+  kiali:
+    enabled: true
+  opentelemetry:
+    enabled: true
+  tempo:
+    enabled: true
+  ambientMesh:
+    enabled: true
+
+  # Developer tooling, operators only.
+  pipelines:
+    enabled: true
+  devSpaces:
+    enabled: true
+  developerHub:
+    enabled: true
+  artifactSigner:
+    enabled: true
+
+# Off on purpose:
+#   odf, storageNodes, localStorage, lvm, loki, imageRegistry s3, acm observability, aap storage,
+#   quay: need ODF or object storage.
+#   acm, gitops, teamGitops: this hub's ACM and Argo CD deliver PolicyStack (docs/install.md).
+#   masterNodes, workerNodes, infraNodes, partitioning, machineHealth: platform specific or reboot
+#   nodes.
+#   upgrade: the hub fleet file sets no version or channel.
+#   cim, disconnected: nothing to build or mirror.
