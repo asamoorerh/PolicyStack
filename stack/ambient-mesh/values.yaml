@@ -1,0 +1,81 @@
+stack:
+  ambientMesh:
+    enabled: false
+
+    config:
+      # Istio version the sail operator installs
+      istioVersion: v1.28-latest
+      # Resource requests for istiod
+      pilotRequests:
+        cpu: 100m
+        memory: 256Mi
+      tracing:
+        # Export mesh traces and show them in Kiali. Keep in step with `policies.tracing.enabled`.
+        enabled: false
+        # OTel collector the mesh exports spans to
+        collectorService: otel-collector.istio-system.svc.cluster.local
+        # Tempo query frontend Kiali reads traces from
+        tempoQueryUrl: http://tempo-servicemesh-query-frontend.tracing-system.svc.cluster.local:3200
+
+    default:
+      remediationAction: enforce
+      severity: medium
+      categories:
+        - SC System and Communications Protection
+      controls:
+        - SC-8 Transmission Confidentiality and Integrity
+      standards:
+        - NIST SP 800-53
+
+    policies:
+      # The mesh needs the sail operator's CRDs and Kiali's, both of which live in
+      # other elements on the same cluster.
+      mesh:
+        description: "Service Mesh 3 control plane, CNI and ztunnel"
+        dependencies:
+          - name: install
+            element: servicemesh
+          - name: install
+            element: kiali
+        templates:
+          namespaces:
+            description: "Mesh namespaces"
+
+          control-plane:
+            description: "IstioCNI, Istio and ztunnel"
+            # The namespaces must exist before the operands land in them
+            extraDependencies:
+              - name: namespaces
+            ignorePending: true
+
+          observability:
+            description: "Kiali, telemetry and monitors"
+            extraDependencies:
+              - name: control-plane
+            ignorePending: true
+
+      # Deploy Tempo and wire the mesh and Kiali to it. Off by default: it pulls in the
+      # tempo element and an ODF bucket on the same cluster.
+      tracing:
+        enabled: false
+        description: "Tempo tracing backend for the mesh"
+        dependencies:
+          - name: mesh
+          - name: install
+            element: tempo
+          - name: install
+            element: opentelemetry
+          - name: ready
+            element: odf
+        templates:
+          tempo-storage:
+            description: "Tempo namespace, bucket and credentials"
+            config:
+              tracingNamespace: tracing-system
+              tempoBucket: tempo-bucket-odf
+
+          tempostack:
+            description: "TempoStack"
+            extraDependencies:
+              - name: tempo-storage
+            ignorePending: true

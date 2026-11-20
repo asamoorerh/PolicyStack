@@ -1,0 +1,15 @@
+{{- /*
+Refuses, visibly, anything named <cluster> lifecycle did not build (lifecycle.foreign): a
+mustnothave on it is NonCompliant while it exists. Otherwise renders nothing, which ACM reports as
+Compliant.
+*/ -}}
+{{ include "lifecycle.foreign" . }}
+{{ "{{-" }} with $foreign {{ "}}" }}
+- complianceType: mustnothave
+  objectDefinition:
+    apiVersion: '{{ "{{" }} .apiVersion {{ "}}" }}'
+    kind: '{{ "{{" }} .kind {{ "}}" }}'
+    metadata:
+      name: '{{ "{{" }} .metadata.name {{ "}}" }}'
+      namespace: '{{ "{{" }} dig "metadata" "namespace" "" . {{ "}}" }}'
+{{ "{{-" }} end {{ "}}" }}

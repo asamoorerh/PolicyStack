@@ -1,0 +1,29 @@
+stack:
+  coo:
+    enabled: false
+
+    default:
+      remediationAction: enforce
+      severity: medium
+      categories:
+        - CM Configuration Management
+      controls:
+        - CM-2 Baseline Configuration
+      standards:
+        - NIST SP 800-53
+
+    policies:
+      install:
+        description: "Install and manage Cluster Observability Operator"
+
+    operatorPolicies:
+      coo:
+        description: "Cluster Observability Operator for monitoring, logging and tracing UIs"
+        # Must match the CSV displayName so the generated status check can find it
+        displayName: "Cluster Observability Operator"
+        namespace: openshift-cluster-observability-operator
+        clusterMonitoring: true
+        subscription:
+          channel: stable
+          name: cluster-observability-operator
+        versions: []

@@ -1,0 +1,31 @@
+stack:
+  servicemesh:
+    enabled: false
+
+    default:
+      remediationAction: enforce
+      severity: medium
+      categories:
+        - CM Configuration Management
+      controls:
+        - CM-2 Baseline Configuration
+      standards:
+        - NIST SP 800-53
+
+    policies:
+      install:
+        description: "Install and manage Red Hat OpenShift Service Mesh 3"
+
+    operatorPolicies:
+      servicemesh3:
+        description: "Red Hat OpenShift Service Mesh 3 operator"
+        # Must match the CSV displayName so the generated status check can find it
+        displayName: "Red Hat OpenShift Service Mesh 3"
+        namespace: openshift-operators
+        operatorGroup:
+          # Reuse the namespace's existing cluster-scoped OperatorGroup; a second one breaks OLM
+          name: global-operators
+        subscription:
+          channel: stable
+          name: servicemeshoperator3
+        versions: []

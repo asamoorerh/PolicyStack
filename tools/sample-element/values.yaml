@@ -1,0 +1,33 @@
+stack:
+  myElement:
+    enabled: false
+
+    default:
+      remediationAction: inform
+      severity: medium
+
+    # Settings the converters read as `.Config`.
+    config:
+      # Log level the operator reads from its ConfigMap
+      logLevel: info
+
+    policies:
+      install:
+        description: "Install and configure the example operator"
+        templates:
+          my-element-instance:
+            description: "Operator configuration"
+            waitForOperator: my-element
+          my-element-netpol:
+            enabled: false
+            description: "Allow ingress from the same namespace only"
+
+    operatorPolicies:
+      my-element:
+        displayName: "Example Operator"
+        namespace: my-element
+        subscription:
+          name: my-element-operator
+          channel: stable
+        # Allowed CSV names, pinned per layer; empty follows the channel
+        versions: []

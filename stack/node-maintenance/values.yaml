@@ -1,0 +1,35 @@
+stack:
+  nodeMaintenance:
+    enabled: false
+
+    default:
+      remediationAction: enforce
+      severity: medium
+      categories:
+        - CM Configuration Management
+      controls:
+        - CM-2 Baseline Configuration
+      standards:
+        - NIST SP 800-53
+
+    # Parent policy grouping the Node Maintenance Operator install resources
+    policies:
+      install:
+        description: "Install and manage the Node Maintenance Operator"
+
+    # OperatorPolicy installing the Node Maintenance Operator subscription
+    operatorPolicies:
+      node-maintenance:
+        description: "Node Maintenance Operator (Workload Availability)"
+        displayName: "Node Maintenance Operator"
+        namespace: openshift-workload-availability
+        clusterMonitoring: true
+        operatorGroup:
+          # No targetNamespaces: this operator only advertises AllNamespaces, so an OperatorGroup
+          # scoped to its own namespace makes the CSV fail with
+          # "OwnNamespace InstallModeType not supported".
+          name: node-maintenance-operator-group
+        subscription:
+          channel: stable
+          name: node-maintenance-operator
+        versions: []

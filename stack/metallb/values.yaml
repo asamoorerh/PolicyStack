@@ -1,0 +1,91 @@
+stack:
+  metallb:
+    enabled: false
+
+    # MetalLB configuration. Map keys are object names; values are MetalLB API specs.
+    config:
+      # IPAddressPool specs, e.g.
+      # internal: {addresses: ["192.168.100.1-192.168.100.20"], autoAssign: true}
+      ipAddressPools: {}
+      # L2Advertisement specs, e.g. internal: {ipAddressPools: [internal]}
+      l2Advertisements: {}
+      # BGPAdvertisement specs, e.g. internal: {ipAddressPools: [internal], peers: [rack1]}
+      bgpAdvertisements: {}
+      # BGPPeer specs, e.g. rack1: {myASN: 64512, peerASN: 64512, peerAddress: 10.0.0.1}
+      bgpPeers: {}
+      # Namespace resource ceiling, applied when the quota policy is enabled
+      quota:
+        cpu: "100m"
+        memory: "256Mi"
+
+    default:
+      remediationAction: enforce
+      severity: medium
+      categories:
+        - SC System and Communications Protection
+      controls:
+        - SC-7 Boundary Protection
+      standards:
+        - NIST SP 800-53
+
+    policies:
+      install:
+        description: "Install and manage the MetalLB operator"
+
+      config:
+        description: "Deploy the MetalLB instance"
+        dependencies:
+          - name: install
+        templates:
+          metallb-instance:
+            description: "MetalLB instance"
+            waitForOperator: metallb
+
+      # Apply a ResourceQuota to the metallb namespace
+      quota:
+        enabled: false
+        description: "Resource quota for the MetalLB namespace"
+        severity: low
+        dependencies:
+          - name: install
+        templates:
+          resourcequota:
+            description: "MetalLB namespace quota"
+
+      # Apply the address pools, advertisements and peers in config
+      addressing:
+        enabled: false
+        description: "Address pools, advertisements and BGP peers"
+        # The MetalLB CRDs and controller must exist before any of these apply
+        dependencies:
+          - name: config
+        templates:
+          pools:
+            description: "IPAddressPools"
+            # Exact match, so a spec field removed from config is removed from the object
+            complianceType: mustonlyhave
+
+          l2:
+            description: "L2Advertisements"
+            # Exact match, so a spec field removed from config is removed from the object
+            complianceType: mustonlyhave
+
+          bgp:
+            description: "BGPAdvertisements"
+            # Exact match, so a spec field removed from config is removed from the object
+            complianceType: mustonlyhave
+
+          peers:
+            description: "BGPPeers"
+            # Exact match, so a spec field removed from config is removed from the object
+            complianceType: mustonlyhave
+
+    operatorPolicies:
+      metallb:
+        description: "MetalLB operator"
+        displayName: "MetalLB Operator"
+        namespace: metallb-system
+        subscription:
+          channel: stable
+          name: metallb-operator
+        versions: []

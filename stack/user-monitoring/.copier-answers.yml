@@ -1,0 +1,4 @@
+# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
+_commit: v1.0.0-rc.3
+_src_path: https://github.com/PolicyStack/PolicyStack.git
+element: user-monitoring

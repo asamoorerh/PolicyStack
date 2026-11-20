@@ -1,0 +1,29 @@
+stack:
+  developerHub:
+    enabled: false
+
+    default:
+      remediationAction: enforce
+      severity: medium
+      categories:
+        - CM Configuration Management
+      controls:
+        - CM-2 Baseline Configuration
+      standards:
+        - NIST SP 800-53
+
+    policies:
+      install:
+        description: "Install and manage Red Hat Developer Hub"
+
+    operatorPolicies:
+      rhdh:
+        description: "Red Hat Developer Hub (Backstage) internal developer portal"
+        # Must match the CSV displayName so the generated status check can find it
+        displayName: "Red Hat Developer Hub Operator"
+        namespace: rhdh-operator
+        clusterMonitoring: true
+        subscription:
+          channel: fast-1.9
+          name: rhdh
+        versions: []

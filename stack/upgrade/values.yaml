@@ -1,0 +1,62 @@
+stack:
+  upgrade:
+    enabled: true
+
+    # Upgrade graph
+    config:
+      # Update service graph URL, e.g. a local OSUS. Empty leaves the cluster's value alone
+      upstream: ""
+
+    default:
+      remediationAction: enforce
+      severity: medium
+      categories:
+        - CM Configuration Management
+      controls:
+        - CM-2 Baseline Configuration
+      standards:
+        - NIST SP 800-53
+
+    # The fleet file's `version` and `channel` drive the upgrade (docs/guides/upgrades.md). Each
+    # policy renders only when its input is set; enabled: false pauses it.
+    policies:
+      # Pin the ClusterVersion channel and upstream; enabled: false pauses both
+      channel:
+        description: "Pin the cluster upgrade channel"
+        templates:
+          pin:
+            description: "ClusterVersion channel"
+
+      # Drive the cluster to the fleet file's version, and report on progress. The whole
+      # flow (guard, trigger, completion) is one policy, so none of it reports NonCompliant
+      # when no upgrade is targeted.
+      upgrade:
+        description: "Drive the cluster to the target version and report on progress"
+        severity: high
+        # Gates are InformOnly: ACM keeps them inform even under a Policy-level enforce.
+        templates:
+          # Inform-only reachability guard
+          guard:
+            description: "Target version reachability"
+            remediationAction: InformOnly
+            # Appends the ClusterVersion conditions that explain a hold
+            customMessage: &cvoReason
+              noncompliant: '{{ .DefaultMessage }}{{ range .Policy.status.relatedObjects }}{{ range (dig "object" "status" "conditions" list .) }}{{ if or (eq .type "Progressing") (and (eq .type "Failing" "Invalid") (eq .status "True")) (and (eq .type "ReleaseAccepted" "RetrievedUpdates") (eq .status "False")) }}; {{ .type }}: {{ .message }}{{ end }}{{ end }}{{ end }}'
+
+          # Upgrade trigger, held until the guard reports the target is reachable
+          trigger:
+            description: "ClusterVersion desiredUpdate"
+            # Never start an upgrade the guard says is invalid
+            extraDependencies:
+              - name: guard
+            ignorePending: true
+
+          # Completion signal, only meaningful once the trigger has been applied
+          progress:
+            description: "Upgrade completion"
+            remediationAction: InformOnly
+            severity: medium
+            customMessage: *cvoReason
+            extraDependencies:
+              - name: trigger
+            ignorePending: true

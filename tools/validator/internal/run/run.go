@@ -1,0 +1,706 @@
+// Package run discovers elements, loads fixtures, runs each check in its
+// phase, and aggregates the findings.
+package run
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
+	"sync"
+
+	"gopkg.in/yaml.v3"
+	sigsyaml "sigs.k8s.io/yaml"
+
+	"github.com/PolicyStack/PolicyStack/tools/validator/internal/acmtemplates"
+	"github.com/PolicyStack/PolicyStack/tools/validator/internal/cascade"
+	"github.com/PolicyStack/PolicyStack/tools/validator/internal/chart"
+	"github.com/PolicyStack/PolicyStack/tools/validator/internal/checks"
+	"github.com/PolicyStack/PolicyStack/tools/validator/internal/fixtures"
+	"github.com/PolicyStack/PolicyStack/tools/validator/internal/render"
+)
+
+// Options is the runtime configuration for a single Run.
+type Options struct {
+	RepoRoot     string
+	StackDir     string
+	SampleDir    string
+	LifecycleDir string
+	ValuesDir    string
+	FixturesDir  string
+	HelmBin      string
+	// CRDsDir holds the CRDs POLICY080 validates against. Empty disables POLICY080.
+	CRDsDir string
+	// ExtraValues are absolute paths appended to every (element, fixture)
+	// cascade but the lifecycle chart's, at highest precedence. Used to supply
+	// baseline values such as `selector` when fixture names have no file in
+	// values/clusters/.
+	ExtraValues []string
+	// AllOn ranks the all-on profile (chart.AllOn) of the stack/ elements, and tools/sample-element
+	// when IncludeSample is set, below ExtraValues.
+	AllOn         bool
+	Skip          []string
+	Only          []string
+	IncludeSample bool
+	Jobs          int
+	Logger        *slog.Logger
+	// RenderDir, when set, receives each render at <RenderDir>/<fleet file path under
+	// FixturesDir, without .yaml>/<chart>.yaml, for diffing two trees.
+	RenderDir string
+	// BaseBranch is the branch the checked-out HEAD lands on, such as a PR's base branch. POLICY052
+	// resolves a revision naming it to HEAD.
+	BaseBranch string
+	// Element, when set, checks and renders only the chart of that name, and keeps only its findings
+	// from the repo-wide checks, which still see every element. Cluster, when set, renders only the
+	// fleet file of that name.
+	Element, Cluster string
+	// Evaluate also writes, beside each render in RenderDir, <chart>.evaluated.yaml: the objects its
+	// ConfigurationPolicies apply, ACM templates resolved as POLICY081 does.
+	Evaluate bool
+}
+
+// Result aggregates the run output.
+type Result struct {
+	Findings []checks.Finding
+	Errors   int
+	Warnings int
+}
+
+// Run executes the validator with opts. ctx is used to cancel helm calls.
+func Run(ctx context.Context, opts Options) (Result, error) {
+	if opts.Logger == nil {
+		opts.Logger = slog.Default()
+	}
+	if opts.Jobs <= 0 {
+		opts.Jobs = runtime.NumCPU()
+	}
+	if err := render.HelmAvailable(opts.HelmBin); err != nil {
+		return Result{}, err
+	}
+
+	rootValues := filepath.Join(opts.RepoRoot, "values.yaml")
+	sample := ""
+	if opts.IncludeSample {
+		sample = opts.SampleDir
+	}
+	elements, ns, err := chart.LoadAll(opts.StackDir, sample, rootValues)
+	if err != nil {
+		return Result{}, fmt.Errorf("load elements: %w", err)
+	}
+	if len(elements) == 0 {
+		opts.Logger.Warn("no elements found", "stack-dir", opts.StackDir)
+	}
+	if opts.AllOn {
+		file, err := writeAllOn(elements)
+		if err != nil {
+			return Result{}, fmt.Errorf("all-on profile: %w", err)
+		}
+		defer func() { _ = os.Remove(file) }()
+		opts.ExtraValues = append([]string{file}, opts.ExtraValues...)
+	}
+	// Absence is decided by Chart.yaml alone: Helm and Argo CD render a chart without values.yaml,
+	// so a missing values.yaml must fail the load rather than skip the chart.
+	// lifecycle holds one Element per engine component.
+	var lifecycle []*chart.Element
+	if _, err := os.Stat(filepath.Join(opts.LifecycleDir, "Chart.yaml")); errors.Is(err, fs.ErrNotExist) {
+		opts.Logger.Warn("no lifecycle chart found", "lifecycle-dir", opts.LifecycleDir)
+	} else if lifecycle, err = chart.LoadComponents(opts.LifecycleDir, ns); err != nil {
+		return Result{}, fmt.Errorf("load lifecycle chart: %w", err)
+	}
+	// The chart and repo phases check each lifecycle component like any element.
+	all := append(slices.Clip(elements), lifecycle...)
+	selected := all
+	if opts.Element != "" {
+		named := func(el *chart.Element) bool { return el.ChartName != opts.Element }
+		elements, lifecycle = slices.DeleteFunc(slices.Clone(elements), named), slices.DeleteFunc(slices.Clone(lifecycle), named)
+		selected = slices.DeleteFunc(slices.Clone(all), named)
+		if len(selected) == 0 {
+			return Result{}, fmt.Errorf("--element %s: no such chart", opts.Element)
+		}
+	}
+
+	clusters, err := fixtures.LoadDir(opts.FixturesDir)
+	if err != nil {
+		return Result{}, fmt.Errorf("load fixtures: %w", err)
+	}
+	if len(clusters) == 0 {
+		opts.Logger.Warn("no fixture clusters found", "fixtures-dir", opts.FixturesDir)
+	}
+	renderFor := clusters
+	if opts.Cluster != "" {
+		renderFor = slices.DeleteFunc(slices.Clone(clusters), func(cl *fixtures.Cluster) bool { return cl.Name != opts.Cluster })
+		if len(renderFor) == 0 {
+			return Result{}, fmt.Errorf("--cluster %s: no such fleet file in %s", opts.Cluster, opts.FixturesDir)
+		}
+	}
+
+	runner := render.New(opts.HelmBin)
+
+	crds, err := loadCRDs(opts)
+	if err != nil {
+		return Result{}, err
+	}
+	registered := buildRegistry(opts, runner, crds)
+	enabled, err := filterRules(registered, opts)
+	if err != nil {
+		return Result{}, err
+	}
+	opts.Logger.Debug("rule set", "enabled", ruleIDs(enabled))
+
+	res := Result{}
+	var mu sync.Mutex
+	var writeErrs []error
+	addFindings := func(fs []checks.Finding) {
+		if len(fs) == 0 {
+			return
+		}
+		mu.Lock()
+		res.Findings = append(res.Findings, fs...)
+		mu.Unlock()
+	}
+
+	// Fetch dependencies up front so helm lint in the chart phase does not
+	// fail on a missing charts/policy-library-*.tgz. A failed fetch is a RENDER000, once per chart,
+	// and the chart is not rendered: Helm renders any archive in charts/ with the dependency's name,
+	// whatever its version.
+	for _, el := range selected {
+		if err := runner.EnsureDeps(ctx, el.Dir); err != nil && !skipped("RENDER000", opts) {
+			addFindings([]checks.Finding{*depsFinding(el, err)})
+		}
+	}
+
+	// A 3.x chart is only rendered and reported by POLICY031: every other check reads the 4.0 model.
+	v3 := map[string]bool{}
+	for _, el := range all {
+		if el.Values != nil && el.Values.Component != nil && el.Values.Component.V3 {
+			v3[el.ChartName] = true
+		}
+	}
+
+	// Phase 1: chart-wide checks (per element).
+	for _, el := range selected {
+		c := checks.Context{Element: el, Logger: opts.Logger}
+		for _, ck := range enabled {
+			if ck.Phase() != checks.PhaseChart || v3[el.ChartName] && ck.ID() != "POLICY031" {
+				continue
+			}
+			addFindings(ck.Run(c))
+		}
+	}
+
+	// Phase 2: per-cluster checks. One helm template per (element, fixture), run in parallel.
+	pairs := buildPairs(elements, lifecycle, renderFor)
+
+	// Rendered parent policy names per (namespace, cluster), for cross-element POLICY002.
+	type clusterKey struct {
+		policyNs    string
+		clusterName string
+	}
+	type rendered struct {
+		element string
+		path    string // values.yaml path for source line lookups
+		name    string
+	}
+	dupAccum := map[clusterKey][]rendered{}
+	// Policies some fleet file's render holds, per chart, for POLICY011.
+	renderedPolicies := map[string]map[string]bool{}
+	var dupMu sync.Mutex
+
+	sem := make(chan struct{}, opts.Jobs)
+	var wg sync.WaitGroup
+	for _, p := range pairs {
+		sem <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-sem }()
+			c, renderFinding := perCluster(ctx, opts, runner, p)
+			if opts.RenderDir != "" {
+				if err := writeRender(opts, p, c.Rendered, renderFinding); err != nil {
+					mu.Lock()
+					writeErrs = append(writeErrs, err)
+					mu.Unlock()
+				}
+			}
+			if opts.RenderDir != "" && opts.Evaluate && renderFinding == nil {
+				if err := writeEvaluated(opts, p, c.Rendered); err != nil {
+					mu.Lock()
+					writeErrs = append(writeErrs, err)
+					mu.Unlock()
+				}
+			}
+			if renderFinding != nil && !skipped("RENDER000", opts) {
+				addFindings([]checks.Finding{*renderFinding})
+			}
+			for _, ck := range enabled {
+				if ck.Phase() != checks.PhaseCluster || v3[p.el.ChartName] {
+					continue
+				}
+				fs := ck.Run(c)
+				for i := range fs {
+					if fs[i].File == "" {
+						fs[i].File = p.cl.SourceFile
+					}
+				}
+				addFindings(fs)
+			}
+			// Record parent policy names for cross-element POLICY002, and rendered Policies for POLICY011.
+			if c.Element != nil && c.Element.Values != nil && c.Element.Values.Component != nil {
+				ns := c.Element.Values.PolicyNamespace
+				rel := c.Cluster.ReleaseName
+				key := clusterKey{policyNs: ns, clusterName: c.Cluster.ClusterName}
+				comp := c.Element.Values.Component
+				keys := checks.PolicyKeys(c)
+				dupMu.Lock()
+				for _, k := range keys {
+					if renderedPolicies[c.Element.ChartName] == nil {
+						renderedPolicies[c.Element.ChartName] = map[string]bool{}
+					}
+					renderedPolicies[c.Element.ChartName][k] = true
+				}
+				for _, pol := range comp.Policies {
+					if pol.Name == "" {
+						continue
+					}
+					dupAccum[key] = append(dupAccum[key], rendered{
+						element: c.Element.ChartName,
+						path:    c.Element.ValuesFile,
+						name:    fmt.Sprintf("%s-%s", pol.Name, rel),
+					})
+				}
+				dupMu.Unlock()
+			}
+		})
+	}
+	wg.Wait()
+	if err := errors.Join(writeErrs...); err != nil {
+		return Result{}, fmt.Errorf("write renders: %w", err)
+	}
+	for _, ck := range enabled {
+		if s, ok := ck.(*checks.CRDSchemaCheck); ok && s.CRDs != nil {
+			opts.Logger.Info("POLICY080 schema check", "validated", s.Validated())
+		}
+	}
+
+	// Cross-element POLICY002.
+	if !skipped("POLICY002", opts) {
+		for key, list := range dupAccum {
+			seen := map[string]rendered{}
+			for _, r := range list {
+				if prior, ok := seen[r.name]; ok && prior.element != r.element {
+					addFindings([]checks.Finding{{
+						RuleID:   "POLICY002",
+						Severity: checks.SevError,
+						Element:  r.element,
+						Cluster:  key.clusterName,
+						Message: fmt.Sprintf("rendered policy name %q in namespace %q collides across elements (also in %s)",
+							r.name, key.policyNs, prior.element),
+						File: r.path,
+					}})
+				}
+				seen[r.name] = r
+			}
+		}
+	}
+
+	// Phase 3: repo-wide checks.
+	layers, err := valueLayers(rootValues, opts.ValuesDir)
+	if err != nil {
+		return Result{}, fmt.Errorf("list values layers: %w", err)
+	}
+	var fleet []checks.FleetFile
+	for _, cl := range clusters {
+		if cl.Hub != "" && cl.State != "absent" {
+			r := cascade.Resolve(cl, opts.LifecycleDir, "lifecycle", opts.RepoRoot, opts.ValuesDir)
+			fleet = append(fleet, checks.FleetFile{Name: cl.Name, Hub: cl.Hub, Files: append(r.ValueFiles, cl.SourceFile)})
+		}
+	}
+	repoCtx := checks.Context{AllElements: all, Layers: layers, Fleet: fleet, Clusters: clusters, RenderedPolicies: renderedPolicies, Logger: opts.Logger}
+	for _, ck := range enabled {
+		if ck.Phase() != checks.PhaseRepo {
+			continue
+		}
+		fs := slices.DeleteFunc(ck.Run(repoCtx), func(f checks.Finding) bool {
+			return v3[f.Element] || opts.Element != "" && f.Element != opts.Element
+		})
+		addFindings(fs)
+	}
+
+	res.Findings = dedupe(res.Findings)
+	for _, f := range res.Findings {
+		if f.Severity == checks.SevError {
+			res.Errors++
+		} else {
+			res.Warnings++
+		}
+	}
+	return res, nil
+}
+
+// writeAllOn writes the all-on profile of elements to a temporary file and returns its path.
+func writeAllOn(elements []*chart.Element) (string, error) {
+	data, err := chart.AllOn(elements)
+	if err != nil {
+		return "", err
+	}
+	f, err := os.CreateTemp("", "all-on-*.yaml")
+	if err != nil {
+		return "", err
+	}
+	_, err = f.Write(data)
+	return f.Name(), errors.Join(err, f.Close())
+}
+
+// valueLayers returns the root values.yaml, when present, then every .yaml file under valuesDir.
+func valueLayers(rootValues, valuesDir string) ([]string, error) {
+	var out []string
+	if _, err := os.Stat(rootValues); err == nil {
+		out = append(out, rootValues)
+	}
+	err := filepath.WalkDir(valuesDir, func(path string, d fs.DirEntry, err error) error {
+		if errors.Is(err, fs.ErrNotExist) {
+			return fs.SkipAll
+		}
+		if err == nil && d.Type().IsRegular() && filepath.Ext(path) == ".yaml" {
+			out = append(out, path)
+		}
+		return err
+	})
+	return out, err
+}
+
+// dedupe drops repeated findings, such as POLICY032 on a values layer that several clusters share.
+func dedupe(fs []checks.Finding) []checks.Finding {
+	seen := map[checks.Finding]bool{}
+	return slices.DeleteFunc(fs, func(f checks.Finding) bool {
+		if seen[f] {
+			return true
+		}
+		seen[f] = true
+		return false
+	})
+}
+
+// pair is one helm template run: an element and the fleet file it renders for.
+type pair struct {
+	el *chart.Element
+	cl *fixtures.Cluster
+	// fleetValues appends the fleet file to the cascade, standing in for the lifecycle
+	// ApplicationSet's valuesObject (hub, state, install). Its revision and valueFiles keys are
+	// not chart values and have no effect.
+	fleetValues bool
+	// engines are the lifecycle chart's components; perCluster checks the one install.engine
+	// selects. Empty for an element.
+	engines []*chart.Element
+}
+
+// buildPairs pairs every element with every fleet file, and lifecycle, when non-empty, with the
+// fleet files that set hub: the lifecycle ApplicationSet selects only those.
+func buildPairs(elements []*chart.Element, lifecycle []*chart.Element, clusters []*fixtures.Cluster) []pair {
+	var pairs []pair
+	for _, el := range elements {
+		for _, cl := range clusters {
+			pairs = append(pairs, pair{el: el, cl: cl})
+		}
+	}
+	for _, cl := range clusters {
+		if len(lifecycle) > 0 && cl.Hub != "" {
+			pairs = append(pairs, pair{el: lifecycle[0], cl: cl, fleetValues: true, engines: lifecycle})
+		}
+	}
+	return pairs
+}
+
+func perCluster(ctx context.Context, opts Options, runner *render.Runner, p pair) (checks.Context, *checks.Finding) {
+	el := p.el
+	res := cascade.Resolve(p.cl, el.Dir, el.ChartName, opts.RepoRoot, opts.ValuesDir)
+	res.ValueFiles = valueFiles(res.ValueFiles, opts, p)
+	if len(p.engines) > 0 {
+		el = selectEngine(p.engines, res.ValueFiles)
+	}
+	c := checks.Context{
+		Element: el,
+		Cluster: &res,
+		Logger:  opts.Logger,
+	}
+	// Also reported before the chart phase; dedupe drops the repeat.
+	if err := runner.EnsureDeps(ctx, el.Dir); err != nil {
+		return c, depsFinding(el, err)
+	}
+	tr := runner.Template(ctx, el.Dir, res.ReleaseName, res.ValueFiles, setString(p))
+	if tr.Err != nil && !errors.Is(tr.Err, context.Canceled) {
+		return c, renderErrorFinding(el, &res, tr)
+	}
+	c.Rendered = tr.Stdout
+	opts.Logger.Debug("rendered", "release", res.ReleaseName, "bytes", len(tr.Stdout))
+	return c, nil
+}
+
+// valueFiles appends to the cascade what ranks above it: the fleet file for a lifecycle pair, in
+// place of the ApplicationSet's valuesObject, or ExtraValues for an element. The lifecycle chart
+// ships its own selector, which ExtraValues' baseline would replace.
+func valueFiles(cascadeFiles []string, opts Options, p pair) []string {
+	if p.fleetValues {
+		return append(cascadeFiles, p.cl.SourceFile)
+	}
+	return append(cascadeFiles, opts.ExtraValues...)
+}
+
+// selectEngine returns the component that install.engine selects in the cascade, the last file
+// setting it winning, as Helm merges them. An engine with no component fails the chart's schema,
+// which RENDER000 reports, so the first component stands in.
+func selectEngine(engines []*chart.Element, files []string) *chart.Element {
+	engine := ""
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		var v struct {
+			Install struct {
+				Engine string `yaml:"engine"`
+			} `yaml:"install"`
+		}
+		if yaml.Unmarshal(data, &v) == nil && v.Install.Engine != "" {
+			engine = v.Install.Engine
+		}
+	}
+	for _, e := range engines {
+		if e.StackKey == engine {
+			return e
+		}
+	}
+	return engines[0]
+}
+
+// setString stands in for the version and channel the Day-2 ApplicationSet passes in valuesObject
+// when the fleet file sets them. A lifecycle pair reads them from the appended fleet file.
+func setString(p pair) []string {
+	if p.fleetValues {
+		return nil
+	}
+	var out []string
+	if p.cl.Version != "" {
+		out = append(out, "version="+p.cl.Version)
+	}
+	if p.cl.Channel != "" {
+		out = append(out, "channel="+p.cl.Channel)
+	}
+	return out
+}
+
+// writeRender writes p's render under opts.RenderDir, keyed by the fleet file's path under
+// FixturesDir because a hub and a spoke may share a name. A failed render is written as comments
+// with the tree's own paths removed, so one failure in two worktrees compares equal. An empty
+// render writes nothing.
+func writeRender(opts Options, p pair, out []byte, failed *checks.Finding) error {
+	fx, sep := filepath.Clean(opts.FixturesDir), string(filepath.Separator)
+	if failed != nil {
+		msg := strings.NewReplacer(fx+sep, "", filepath.Clean(opts.RepoRoot)+sep, "").Replace(failed.Message)
+		out = []byte("# RENDER000: " + strings.ReplaceAll(msg, "\n", "\n# ") + "\n")
+	}
+	if len(bytes.TrimSpace(out)) == 0 {
+		return nil
+	}
+	path, err := renderPath(opts, p)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, out, 0o644)
+}
+
+// renderPath is where writeRender writes p's render.
+func renderPath(opts Options, p pair) (string, error) {
+	rel, err := filepath.Rel(filepath.Clean(opts.FixturesDir), p.cl.SourceFile)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(opts.RenderDir, strings.TrimSuffix(rel, ".yaml"), p.el.ChartName+".yaml"), nil
+}
+
+// writeEvaluated writes, beside p's render, the objects its ConfigurationPolicies apply for p's
+// cluster, each headed by a comment naming its ConfigurationPolicy, after any template that fails as
+// a # POLICY081 comment. An object looking up one the cluster lacks is written as rendered. A
+// render with no ConfigurationPolicy writes nothing.
+func writeEvaluated(opts Options, p pair, rendered []byte) error {
+	objects, failures, err := acmtemplates.Resolve(rendered, p.cl.Name)
+	if err != nil || len(objects)+len(failures) == 0 {
+		return err
+	}
+	var b bytes.Buffer
+	for _, f := range failures {
+		fmt.Fprintf(&b, "# POLICY081 %s: %s\n", f.ConfigPolicy, strings.ReplaceAll(f.Err, "\n", " "))
+	}
+	for _, o := range objects {
+		note := ""
+		if o.Missing {
+			note = ", looks up an object the cluster lacks: as rendered"
+		}
+		if o.Definition == nil {
+			fmt.Fprintf(&b, "---\n# %s: object-templates-raw looks up an object the cluster lacks: see the rendered Policy\n", o.ConfigPolicy)
+			continue
+		}
+		y, err := sigsyaml.JSONToYAML(o.Definition)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&b, "---\n# %s (%s%s)\n%s", o.ConfigPolicy, o.ComplianceType, note, y)
+	}
+	path, err := renderPath(opts, p)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(strings.TrimSuffix(path, ".yaml")+".evaluated.yaml", b.Bytes(), 0o644)
+}
+
+// depsFinding is the RENDER000 for a chart whose dependencies were not fetched. It has no
+// Cluster, so it is reported once per chart.
+func depsFinding(el *chart.Element, err error) *checks.Finding {
+	return &checks.Finding{
+		RuleID:   "RENDER000",
+		Severity: checks.SevError,
+		Element:  el.ChartName,
+		Message:  "dependencies not fetched, so the chart is not rendered: " + err.Error(),
+		File:     filepath.Join(el.Dir, "Chart.yaml"),
+	}
+}
+
+// renderErrorFinding turns a TemplateResult error into a RENDER000 finding.
+// Returns nil if there was no error.
+func renderErrorFinding(el *chart.Element, cl *cascade.Resolved, tr render.TemplateResult) *checks.Finding {
+	if tr.Err == nil {
+		return nil
+	}
+	msg := tr.Stderr
+	if msg == "" {
+		msg = tr.Err.Error()
+	}
+	if hint := renderHint(msg); hint != "" {
+		msg = hint + "\n\n" + msg
+	}
+	f := &checks.Finding{
+		RuleID:   "RENDER000",
+		Severity: checks.SevError,
+		Element:  el.ChartName,
+		Message:  truncate(msg, 1500),
+	}
+	if cl != nil {
+		f.Cluster = cl.ClusterName
+	}
+	if tr.ErrFile != "" {
+		f.File = tr.ErrFile
+		f.Line = tr.ErrLine
+	} else {
+		f.File = el.ValuesFile
+	}
+	return f
+}
+
+// renderHint maps known template error patterns to actionable suggestions.
+// Empty string means no hint applies.
+func renderHint(stderr string) string {
+	switch {
+	case strings.Contains(stderr, "Values.selector.matchExpressions") && strings.Contains(stderr, "nil pointer"):
+		return "hint: cascade did not provide `selector`. In production the ApplicationSet injects it; pass --extra-values <file> with a baseline `selector:` block (or set `disablePlacements: true` on the element)."
+	case strings.Contains(stderr, "nil pointer evaluating"):
+		return "hint: a values key referenced by the chart template is missing. Check that your fixture's cascade resolves to a values file that supplies the missing key."
+	}
+	return ""
+}
+
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
+
+// loadCRDs loads the CRDs in opts.CRDsDir for POLICY080. When there are none, POLICY080 is skipped
+// with a warning, or fails the run under CI, where a skip would pass silently.
+func loadCRDs(opts Options) (checks.CRDs, error) {
+	if opts.CRDsDir == "" || skipped("POLICY080", opts) {
+		return nil, nil
+	}
+	crds, err := checks.LoadCRDs(opts.CRDsDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		if os.Getenv("CI") != "" {
+			return nil, fmt.Errorf("POLICY080: %w: run make -C tools/validator crds", err)
+		}
+		opts.Logger.Warn("POLICY080 skipped: run make -C tools/validator crds", "err", err)
+		return nil, nil
+	}
+	return crds, err
+}
+
+// buildRegistry instantiates checks with their runtime-configured fields.
+func buildRegistry(opts Options, runner *render.Runner, crds checks.CRDs) []checks.Check {
+	out := []checks.Check{}
+	for _, c := range checks.All() {
+		switch v := c.(type) {
+		case *checks.LintCheck:
+			v.Runner = runner
+			out = append(out, v)
+		case *checks.InstallCheck:
+			v.Runner, v.Root = runner, opts.RepoRoot
+			out = append(out, v)
+		case *checks.PinningCheck:
+			v.Root = opts.RepoRoot
+			out = append(out, v)
+		case *checks.AnswersCheck:
+			v.Root = opts.RepoRoot
+			out = append(out, v)
+		case *checks.FleetPinCheck:
+			v.Root, v.Branch = opts.RepoRoot, opts.BaseBranch
+			out = append(out, v)
+		case *checks.CRDSchemaCheck:
+			v.CRDs = crds
+			out = append(out, v)
+		default:
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// filterRules applies --only, else --skip. An unknown ID is an error: a typo would otherwise run
+// nothing or skip nothing, and the run would still pass.
+func filterRules(all []checks.Check, opts Options) ([]checks.Check, error) {
+	ids := ruleIDs(all)
+	var errs []error
+	unknown := func(flag string, list []string) {
+		for _, id := range list {
+			if !slices.Contains(ids, id) {
+				errs = append(errs, fmt.Errorf("--%s: unknown rule ID %q", flag, id))
+			}
+		}
+	}
+	unknown("only", opts.Only)
+	unknown("skip", opts.Skip)
+	if err := errors.Join(errs...); err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(slices.Clone(all), func(c checks.Check) bool { return skipped(c.ID(), opts) }), nil
+}
+
+func ruleIDs(in []checks.Check) []string {
+	out := make([]string, len(in))
+	for i, c := range in {
+		out[i] = c.ID()
+	}
+	return out
+}
+
+func skipped(ruleID string, opts Options) bool {
+	if len(opts.Only) > 0 {
+		return !slices.Contains(opts.Only, ruleID)
+	}
+	return slices.Contains(opts.Skip, ruleID)
+}

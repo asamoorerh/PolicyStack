@@ -1,0 +1,106 @@
+{{- $hub := required "hubName must be set (--set hubName=<name>)" .Values.hubName -}}
+{{- $_ := required "gitRepo must be set (--set gitRepo=<url>)" .Values.gitRepo -}}
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: policystack
+  namespace: openshift-gitops
+  # Left out of ACM backup, as in lifecycle.yaml.
+  labels:
+    velero.io/exclude-from-backup: "true"
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  # Deleting an Application deletes its Policies, so disabling or removing an element or a fleet file
+  # cleans up the hub. The destination is always the hub, and a generator error deletes nothing.
+  syncPolicy:
+    preserveResourcesOnDeletion: false
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - matrix:
+        generators:
+          - matrix:
+              generators:
+                - clusters:
+                    selector:
+                      matchExpressions:
+                        - key: clusterID
+                          operator: Exists
+                - git:
+                    repoURL: '{{ .Values.gitRepo }}'
+                    revision: HEAD
+                    pathParamPrefix: fleet
+                    # A managed hub imported into a Global Hub in default mode has no local-cluster,
+                    # so its parent reads its hub file (docs/guides/global-hub.md).
+                    files:
+                    - path: 'fleet/{{ "{{" }}if index .metadata.labels "local-cluster"{{ "}}" }}hubs/{{ $hub }}{{ "{{" }}else if eq (index .metadata.labels "global-hub.open-cluster-management.io/deploy-mode") "default"{{ "}}" }}hubs/{{ "{{" }}.name{{ "}}" }}{{ "{{" }}else{{ "}}" }}{{ "{{" }}.name{{ "}}" }}{{ "{{" }}end{{ "}}" }}.yaml'
+          - git:
+              repoURL: '{{ .Values.gitRepo }}'
+              revision: '{{ "{{" }}.revision{{ "}}" }}'
+              directories:
+              - path: 'stack/*'
+  template:
+    metadata:
+      labels:
+        velero.io/exclude-from-backup: "true"
+      name: '{{ "{{" }}.path.basenameNormalized{{ "}}" }}-{{ "{{"}}.name{{ "}}" }}'
+    spec:
+      project: default
+      source:
+        repoURL: '{{ .Values.gitRepo }}'
+        targetRevision: '{{ "{{" }}.revision{{ "}}" }}'
+        path: '{{ "{{" }}.path.path{{ "}}" }}'
+      destination:
+        server: 'https://kubernetes.default.svc'
+        namespace: open-cluster-management
+      # One history entry: the last synced revision. Older entries are only read by rollback,
+      # which automated sync disables.
+      revisionHistoryLimit: 1
+      # Server-side apply stores no last-applied-configuration copy of each object, and
+      # ApplyOutOfSyncOnly skips objects that already match Git.
+      syncPolicy:
+        syncOptions:
+        - ServerSideApply=true
+        - ApplyOutOfSyncOnly=true
+        automated:
+          prune: true
+          selfHeal: true
+          allowEmpty: true
+  # manifest-generate-paths lists every file the render reads, so a commit re-renders only the
+  # Applications it touches. ../../lib is the policy-library chart, which Helm reads through file://.
+  # Fleet files are not listed: a fleet change alters the spec, which always re-renders.
+  templatePatch: |
+    {{ "{{" }}- $name := .name {{ "}}" }}
+    {{ "{{" }}- if index .metadata.labels "local-cluster" {{ "}}" }}
+      {{ "{{" }}- $name = {{ $hub | quote }} {{ "}}" }}
+    {{ "{{" }}- end {{ "}}" }}
+    {{ "{{" }}- $files := list "../../values.yaml" {{ "}}" }}
+    {{ "{{" }}- range index . "valueFiles" {{ "}}" }}{{ "{{" }} $files = append $files (print "../../values/" .) {{ "}}" }}{{ "{{" }} end {{ "}}" }}
+    {{ "{{" }}- $files = append $files (print "../../values/clusters/" $name ".yaml") {{ "}}" }}
+    metadata:
+      name: '{{ "{{" }}.path.basenameNormalized{{ "}}" }}-{{ "{{" }} $name {{ "}}" }}'
+      annotations:
+        argocd.argoproj.io/manifest-generate-paths: '{{ "{{" }} join ";" (concat (list "." "../../lib") $files) {{ "}}" }}'
+    spec:
+      source:
+        helm:
+          ignoreMissingValueFiles: true
+          valueFiles:
+          - values.yaml
+          {{ "{{" }}- range $files {{ "}}" }}
+          - {{ "{{" }} . {{ "}}" }}
+          {{ "{{" }}- end {{ "}}" }}
+          valuesObject:
+            {{ "{{" }}- range $k := list "version" "channel" {{ "}}" }}{{ "{{" }} with dig $k "" $ {{ "}}" }}
+            {{ "{{" }} $k {{ "}}" }}: {{ "{{" }} . | quote {{ "}}" }}
+            {{ "{{" }}- end {{ "}}" }}{{ "{{" }} end {{ "}}" }}
+            policystack:
+              libraryMajors: {{ include "policystack.libraryMajors" . }}
+            selector:
+              matchExpressions:
+                name:
+                  key: name
+                  operator: In
+                  values:
+                    - {{ "{{" }} .name | quote {{ "}}" }}

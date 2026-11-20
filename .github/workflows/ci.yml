@@ -1,0 +1,56 @@
+name: CI
+
+# ci is the one required check besides pr-title. No paths filter: a required check skipped by on.paths
+# never reports, so the PR waits on it forever. pr-title.yml stays separate, so a title edit re-runs
+# only that. Jobs that check upstream PolicyStack itself are in upstream.yml.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Pull request runs cancel each other. Runs on main queue; a newer pending run replaces an older one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The hooks' tools only, not Go, Helm, golangci-lint or uv.
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          install_args: python prek aqua:rhysd/actionlint zizmor shellcheck ruff lychee
+
+      # Hooks in .pre-commit-config.yaml. A hook that rewrites a file fails and prints the diff.
+      - run: prek run --all-files --show-diff-on-failure
+
+  validate:
+    name: validate
+    # actionlint 1.7.12 rejects the self-repository form ($/...) zizmor asks for.
+    uses: ./.github/workflows/validate.yml # zizmor: ignore[self-repository]
+
+  # The one required check. A failed, cancelled or skipped job above turns it red.
+  ci:
+    name: ci
+    if: always()
+    needs: [lint, validate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
+        with:
+          jobs: ${{ toJSON(needs) }}

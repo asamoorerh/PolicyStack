@@ -1,0 +1,42 @@
+stack:
+  nfd:
+    enabled: false
+
+    default:
+      remediationAction: enforce
+      severity: medium
+      categories:
+        - CM Configuration Management
+      controls:
+        - CM-2 Baseline Configuration
+      standards:
+        - NIST SP 800-53
+
+    # Parent policy grouping the NFD operator install and the NodeFeatureDiscovery instance
+    policies:
+      install:
+        description: "Install and configure the Node Feature Discovery Operator and instance"
+        templates:
+          nfd-instance:
+            # Wait for the operator's CSV to reach Succeeded; the CRD only exists after install
+            waitForOperator: node-feature-discovery
+            description: "Deploy the NodeFeatureDiscovery custom resource"
+            evaluationInterval:
+              compliant: "10m"
+              noncompliant: "30s"
+
+    # OperatorPolicy installing the NFD subscription
+    operatorPolicies:
+      node-feature-discovery:
+        description: "Node Feature Discovery Operator"
+        displayName: "Node Feature Discovery Operator"
+        namespace: openshift-nfd
+        clusterMonitoring: true
+        operatorGroup:
+          name: openshift-nfd-operator
+          targetNamespaces:
+            - openshift-nfd
+        subscription:
+          channel: stable
+          name: nfd
+        versions: []

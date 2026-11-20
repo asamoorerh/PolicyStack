@@ -1,0 +1,52 @@
+name: Policy Validate
+
+# Called by ci.yml (docs/reference/ci.md#policy-validate).
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# No concurrency block: in a called workflow github.workflow is the caller's name, so a group here
+# would collide with the caller's own and deadlock.
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  validate:
+    name: validate (helm ${{ matrix.helm || 'floor' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # '' is the mise.toml Helm, the hub floor. 4.2.1 is advisory until Argo CD 3.5 ships in
+        # OpenShift GitOps or Helm 3 reaches end of life (2027-02-10), whichever comes first.
+        helm: ['', '4.2.1']
+    continue-on-error: ${{ matrix.helm != '' }}
+    env:
+      MISE_HELM_VERSION: ${{ matrix.helm }} # empty keeps mise.toml
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # tags and origin/* branches for POLICY052
+          persist-credentials: false
+
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          install_args: go helm
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ runner.os }}-${{ hashFiles('tools/validator/go.sum') }}
+          restore-keys: go-${{ runner.os }}-
+
+      # Findings are annotated on the PR, fleet pins (POLICY052) and install/ (POLICY071) included.
+      # Recipes in tools/validator/Makefile.
+      - name: Validate
+        run: make -C tools/validator validate

@@ -1,0 +1,31 @@
+stack:
+  pipelines:
+    enabled: false
+
+    default:
+      remediationAction: enforce
+      severity: medium
+      categories:
+        - CM Configuration Management
+      controls:
+        - CM-2 Baseline Configuration
+      standards:
+        - NIST SP 800-53
+
+    # Parent policy grouping the Pipelines Operator install resources
+    policies:
+      install:
+        description: "Install and manage the OpenShift Pipelines (Tekton) Operator"
+
+    # OperatorPolicy installing Pipelines cluster-wide in openshift-operators
+    operatorPolicies:
+      openshift-pipelines:
+        description: "OpenShift Pipelines (Tekton)"
+        displayName: "Red Hat OpenShift Pipelines"
+        namespace: openshift-operators
+        operatorGroup:
+          name: global-operators
+        subscription:
+          channel: pipelines-1.21
+          name: openshift-pipelines-operator-rh
+        versions: []

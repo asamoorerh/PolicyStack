@@ -1,0 +1,125 @@
+// Package checks defines the Check interface and the rule registry. Each rule
+// is in its own file; All is the authoritative list of rule IDs.
+package checks
+
+import (
+	"log/slog"
+
+	"github.com/PolicyStack/PolicyStack/tools/validator/internal/cascade"
+	"github.com/PolicyStack/PolicyStack/tools/validator/internal/chart"
+	"github.com/PolicyStack/PolicyStack/tools/validator/internal/fixtures"
+)
+
+// Severity controls whether a Finding fails the run by default.
+type Severity int
+
+const (
+	SevWarning Severity = iota
+	SevError
+)
+
+func (s Severity) String() string {
+	switch s {
+	case SevError:
+		return "error"
+	default:
+		return "warning"
+	}
+}
+
+// Phase describes when a check runs.
+type Phase int
+
+const (
+	// PhaseChart runs once per element (no cluster/render context).
+	PhaseChart Phase = iota
+	// PhaseCluster runs once per (element, fixture) with the rendered manifests.
+	PhaseCluster
+	// PhaseRepo runs once with every element loaded (e.g. dependency pinning).
+	PhaseRepo
+)
+
+// Finding is a single rule violation.
+type Finding struct {
+	RuleID   string
+	Severity Severity
+	Element  string // chart name, may be empty for repo-wide
+	Cluster  string // fixture cluster name, empty for chart/repo-wide
+	Message  string
+	File     string
+	Line     int
+	Col      int
+}
+
+// Context is the input to Check.Run.
+type Context struct {
+	Element  *chart.Element
+	Cluster  *cascade.Resolved
+	Rendered []byte // helm template stdout, only populated for PhaseCluster
+	// AllElements is set for PhaseRepo only.
+	AllElements []*chart.Element
+	// Layers is every values layer file, the root values.yaml first. Set for PhaseRepo only.
+	Layers []string
+	// Fleet is every fleet file that sets hub and is not state: absent. Set for PhaseRepo only.
+	Fleet []FleetFile
+	// Clusters is every fleet file. Set for PhaseRepo only.
+	Clusters []*fixtures.Cluster
+	// RenderedPolicies[chart][policy] is set when a fleet file's render of the chart holds the
+	// Policy of policies.<policy>. Set for PhaseRepo only.
+	RenderedPolicies map[string]map[string]bool
+	// AllRendered is not populated. Cross-element POLICY002 runs in run.Run.
+	AllRendered map[string][]byte
+	Logger      *slog.Logger
+}
+
+// FleetFile is a cluster a hub builds, with the files its lifecycle release merges, lowest first.
+type FleetFile struct {
+	Name, Hub string
+	Files     []string
+}
+
+// Check is implemented by every concrete rule.
+type Check interface {
+	ID() string
+	Phase() Phase
+	Run(Context) []Finding
+}
+
+// All returns the registered checks in stable order. A new rule, or a new error in a rule, that can
+// fail a repository that passes today ships as SevWarning for at least one framework minor before
+// SevError; one preventing an outage or a security problem may be SevError at once. IDs are never
+// reused (docs/contributing.md#validator-rules).
+func All() []Check {
+	return []Check{
+		&NameLengthCheck{},      // POLICY001
+		&DuplicateNameCheck{},   // POLICY002
+		&SubPolicyNameCheck{},   // POLICY003
+		&DependencyCheck{},      // POLICY011
+		&UnusedConverterCheck{}, // POLICY021
+		&ConfigReadCheck{},      // POLICY022
+		&EnumCheck{},            // POLICY030
+		&DeadKeyCheck{},         // POLICY031
+		&LayerOperatorCheck{},   // POLICY032
+		&PruneCheck{},           // POLICY033
+		&LayerFleetKeyCheck{},   // POLICY034
+		&LayerKeyCheck{},        // POLICY035
+		&ProtectedObjectCheck{}, // POLICY037
+		&SourceCheck{},          // POLICY038
+		&DeprecatedKeyCheck{},   // POLICY039
+		&PolicySetCheck{},       // POLICY040
+		&LabelCheck{},           // POLICY050
+		&BareMetalCheck{},       // POLICY051
+		&FleetPinCheck{},        // POLICY052 (Root, Branch set by run.buildRegistry)
+		&PinningCheck{},         // POLICY060
+		&AnswersCheck{},         // POLICY061 (Root set by run.buildRegistry)
+		&LintCheck{},            // POLICY070 (Runner set by run.buildRegistry)
+		&InstallCheck{},         // POLICY071 (Runner, Root set by run.buildRegistry)
+		&CRDSchemaCheck{},       // POLICY080 (CRDs set by run.buildRegistry)
+		&ACMTemplateCheck{},     // POLICY081
+		&EmptyPolicyCheck{},     // POLICY082
+		&CamelCaseCheck{},       // POLICY090
+		&ElementNameCheck{},     // POLICY091
+		&DeprecationCheck{},     // POLICY092
+		&RenderCheck{},          // RENDER000
+	}
+}

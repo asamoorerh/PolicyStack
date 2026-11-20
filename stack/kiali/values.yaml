@@ -1,0 +1,31 @@
+stack:
+  kiali:
+    enabled: false
+
+    default:
+      remediationAction: enforce
+      severity: medium
+      categories:
+        - CM Configuration Management
+      controls:
+        - CM-2 Baseline Configuration
+      standards:
+        - NIST SP 800-53
+
+    policies:
+      install:
+        description: "Install and manage Kiali Operator provided by Red Hat"
+
+    operatorPolicies:
+      kiali:
+        description: "Kiali service mesh observability console"
+        # Must match the CSV displayName so the generated status check can find it
+        displayName: "Kiali Operator"
+        namespace: openshift-operators
+        operatorGroup:
+          # Reuse the namespace's existing cluster-scoped OperatorGroup; a second one breaks OLM
+          name: global-operators
+        subscription:
+          channel: stable
+          name: kiali-ossm
+        versions: []

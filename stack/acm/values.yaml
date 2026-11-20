@@ -1,0 +1,124 @@
+stack:
+  acm:
+    enabled: false
+
+    config:
+      # High or Basic. Basic runs single replicas and suits lab hubs.
+      availabilityConfig: High
+      # Whether the hub also manages itself as `local-cluster`
+      selfManaged: true
+      # ACM Search database storage
+      search:
+        size: 100Gi
+        # Empty uses the cluster default. The field is then omitted, since an empty string
+        # disables provisioning.
+        storageClass: ""
+      # Observability sizing
+      observability:
+        # Namespace for MultiClusterObservability and its bucket
+        namespace: open-cluster-management-observability
+        # ObjectBucketClaim name. Its ConfigMap and Secret carry the Thanos bucket credentials.
+        bucket: acm-observability
+        enableMetrics: true
+        interval: 300
+        storageClass: gp3-csi
+        bucketStorageClass: openshift-storage.noobaa.io
+        alertmanagerStorageSize: 1Gi
+        compactStorageSize: 100Gi
+        receiveStorageSize: 100Gi
+        ruleStorageSize: 1Gi
+        storeStorageSize: 10Gi
+      # Policy addon tuning, keyed by addon name. The shipped defaults raise the
+      # stock concurrency and rate limits, which are the usual bottleneck at scale.
+      addons:
+        config-policy-controller:
+          evaluationConcurrency: 5
+          clientQPS: 75
+          clientBurst: 100
+          requests: {cpu: 150m, memory: 256Mi}
+          limits: {memory: 1Gi}
+        governance-policy-framework:
+          evaluationConcurrency: 5
+          clientQPS: 75
+          clientBurst: 100
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {memory: 512Mi}
+
+    default:
+      remediationAction: enforce
+      severity: medium
+      categories:
+        - CM Configuration Management
+      controls:
+        - CM-2 Baseline Configuration
+      standards:
+        - NIST SP 800-53
+
+    # The element is hub-only: enable it and its optional policies in values/acm/*.yaml.
+    policies:
+      install:
+        description: "Install and manage the ACM operator"
+
+      hub:
+        description: "Deploy the MultiClusterHub"
+        severity: high
+        dependencies:
+          - name: install
+        templates:
+          mch:
+            description: "MultiClusterHub"
+            waitForOperator: acm
+
+      # Long-term metric storage via Thanos in a NooBaa bucket. Requires ODF on the
+      # same cluster, so this waits for it.
+      observability:
+        enabled: false
+        description: "Long-term metric storage"
+        dependencies:
+          - name: hub
+          - name: ready
+            element: odf
+        templates:
+          bucket:
+            description: "Observability namespace and Thanos bucket"
+
+          mco:
+            description: "MultiClusterObservability and its object storage config"
+            # The bucket credentials only exist once the bucket is provisioned
+            extraDependencies:
+              - name: bucket
+            ignorePending: true
+
+      # Persistent storage for ACM Search
+      search:
+        enabled: false
+        description: "ACM Search persistent storage"
+        dependencies:
+          - name: hub
+        templates:
+          search-storage:
+            description: "Search database storage"
+
+      # Tune the policy addons pushed to managed clusters
+      addons:
+        enabled: false
+        description: "Policy addon tuning"
+        dependencies:
+          - name: hub
+        templates:
+          addon-tuning:
+            description: "Policy addon concurrency and resources"
+
+    operatorPolicies:
+      acm:
+        description: "Advanced Cluster Management operator"
+        displayName: "Advanced Cluster Management for Kubernetes"
+        namespace: open-cluster-management
+        operatorGroup:
+          name: open-cluster-management
+          targetNamespaces:
+            - open-cluster-management
+        subscription:
+          channel: release-2.17
+          name: advanced-cluster-management
+        versions: []

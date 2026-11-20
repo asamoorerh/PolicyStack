@@ -1,0 +1,11 @@
+{{- /*
+Deletes the ManagedCluster. lifecycle.refuse runs in the same evaluation, so a cluster imported
+under the same name after teardown is never detached.
+*/ -}}
+{{ include "lifecycle.refuse" . }}
+- complianceType: mustnothave
+  objectDefinition:
+    apiVersion: cluster.open-cluster-management.io/v1
+    kind: ManagedCluster
+    metadata:
+      name: {{ include "lifecycle.cluster" . }}

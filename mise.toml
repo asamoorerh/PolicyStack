@@ -1,0 +1,38 @@
+# Every tool version lives here; Go libraries live in tools/validator/go.mod. CI installs these with
+# mise-action, contributors with `mise install` (docs/contributing.md).
+[tools]
+go = "1.27.4"
+# The Helm that OpenShift GitOps 1.18 (Argo CD 3.1.6), the supported floor, renders with. Moves only
+# with the floor, so upstream's Renovate leaves it alone.
+helm = "3.18.4"
+# helm-unittest as a standalone binary, so no Helm plugin install is needed: `untt <chart>`.
+"github:helm-unittest/helm-unittest" = { version = "1.2.1", rename_exe = "untt" }
+# 3.14 runs tools/policystack: copier 9.19.1 supports Python 3.14 at most.
+python = ["3.15.2", "3.14.10"]
+# Runs tools/policystack (mise run ps), whose uv.lock pins copier. uv_build in its pyproject.toml
+# tracks this pin.
+uv = "0.13.8"
+prek = "0.5.10"
+golangci-lint = "2.15.0"
+"aqua:rhysd/actionlint" = "1.7.12"
+shellcheck = "0.11.0"
+zizmor = "1.32.0"
+ruff = "0.17.4"
+lychee = "0.24.2"
+
+[tasks.ps]
+description = "Install, add or update PolicyStack: mise run ps -- --help"
+run = "uv run --frozen --project tools/policystack policystack"
+
+[tasks.validate]
+description = "Render and check every fleet cluster (docs/develop/validation.md)"
+run = 'make -C tools/validator validate BASE_BRANCH="${BASE_BRANCH:-main}"'
+
+[tasks.update]
+description = "mise run ps update, then validate; arguments go to ps update"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+mise run ps update "$@"
+mise run validate
+"""

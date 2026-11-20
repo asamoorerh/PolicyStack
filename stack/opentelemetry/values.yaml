@@ -1,0 +1,29 @@
+stack:
+  opentelemetry:
+    enabled: false
+
+    default:
+      remediationAction: enforce
+      severity: medium
+      categories:
+        - CM Configuration Management
+      controls:
+        - CM-2 Baseline Configuration
+      standards:
+        - NIST SP 800-53
+
+    policies:
+      install:
+        description: "Install and manage Red Hat build of OpenTelemetry"
+
+    operatorPolicies:
+      otel:
+        description: "Red Hat build of OpenTelemetry for distributed tracing"
+        # Must match the CSV displayName so the generated status check can find it
+        displayName: "Red Hat build of OpenTelemetry"
+        namespace: openshift-opentelemetry-operator
+        clusterMonitoring: true
+        subscription:
+          channel: stable
+          name: opentelemetry-product
+        versions: []

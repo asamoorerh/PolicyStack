@@ -1,0 +1,35 @@
+stack:
+  eso:
+    enabled: false
+
+    default:
+      remediationAction: enforce
+      severity: medium
+      categories:
+        - CM Configuration Management
+      controls:
+        - CM-2 Baseline Configuration
+      standards:
+        - NIST SP 800-53
+
+    # Parent policy grouping the External Secrets Operator install resources
+    policies:
+      install:
+        description: "Install and manage the External Secrets Operator"
+
+    # OperatorPolicy installing the External Secrets subscription
+    operatorPolicies:
+      external-secrets:
+        description: "External Secrets Operator (Red Hat build)"
+        displayName: "External Secrets Operator for Red Hat OpenShift"
+        namespace: external-secrets-operator
+        clusterMonitoring: true
+        operatorGroup:
+          # No targetNamespaces: this operator only advertises AllNamespaces, so an OperatorGroup
+          # scoped to its own namespace makes the CSV fail with
+          # "OwnNamespace InstallModeType not supported".
+          name: external-secrets-operator-group
+        subscription:
+          channel: stable-v1
+          name: openshift-external-secrets-operator
+        versions: []

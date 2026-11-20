@@ -1,0 +1,691 @@
+package run
+
+import (
+	"cmp"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"maps"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/PolicyStack/PolicyStack/tools/validator/internal/chart"
+	"github.com/PolicyStack/PolicyStack/tools/validator/internal/checks"
+	"github.com/PolicyStack/PolicyStack/tools/validator/internal/fixtures"
+)
+
+func TestBuildPairs(t *testing.T) {
+	a, b := &chart.Element{ChartName: "a"}, &chart.Element{ChartName: "b"}
+	lc := []*chart.Element{{ChartName: "lifecycle"}}
+	spoke := &fixtures.Cluster{Name: "spoke"}
+	built := &fixtures.Cluster{Name: "built", Hub: "acm-dc1"}
+	retired := &fixtures.Cluster{Name: "retired", Hub: "acm-dc1", State: "absent"}
+	hub := &fixtures.Cluster{Name: "acm-dc1"}
+	clusters := []*fixtures.Cluster{spoke, built, retired, hub}
+
+	tests := []struct {
+		name      string
+		elements  []*chart.Element
+		lifecycle []*chart.Element
+		clusters  []*fixtures.Cluster
+		want      []string // "<element>/<cluster>", "+fleet" when the fleet file is appended
+	}{
+		{
+			name:      "lifecycle only for clusters that set hub",
+			elements:  []*chart.Element{a, b},
+			lifecycle: lc,
+			clusters:  clusters,
+			want: []string{
+				"a/spoke", "a/built", "a/retired", "a/acm-dc1",
+				"b/spoke", "b/built", "b/retired", "b/acm-dc1",
+				"lifecycle/built+fleet", "lifecycle/retired+fleet",
+			},
+		},
+		{
+			name:     "no lifecycle chart",
+			elements: []*chart.Element{a},
+			clusters: clusters,
+			want:     []string{"a/spoke", "a/built", "a/retired", "a/acm-dc1"},
+		},
+		{
+			name:      "no element",
+			lifecycle: lc,
+			clusters:  clusters,
+			want:      []string{"lifecycle/built+fleet", "lifecycle/retired+fleet"},
+		},
+		{
+			name:      "no cluster sets hub",
+			elements:  []*chart.Element{a},
+			lifecycle: lc,
+			clusters:  []*fixtures.Cluster{spoke, hub},
+			want:      []string{"a/spoke", "a/acm-dc1"},
+		},
+		{name: "no clusters", elements: []*chart.Element{a}, lifecycle: lc},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got []string
+			for _, p := range buildPairs(tt.elements, tt.lifecycle, tt.clusters) {
+				s := p.el.ChartName + "/" + p.cl.Name
+				if p.fleetValues {
+					s += "+fleet"
+				}
+				got = append(got, s)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValueFiles(t *testing.T) {
+	opts := Options{ExtraValues: []string{"/extra/baseline.yaml"}}
+	cl := &fixtures.Cluster{Name: "built", Hub: "acm-dc1", SourceFile: "/fleet/built.yaml"}
+	cascadeFiles := []string{"/el/values.yaml", "/repo/values.yaml", "/repo/values/clusters/built.yaml"}
+
+	tests := []struct {
+		name string
+		p    pair
+		want []string
+	}{
+		{
+			name: "element ends with ExtraValues",
+			p:    pair{el: &chart.Element{ChartName: "a"}, cl: cl},
+			want: append(slices.Clone(cascadeFiles), "/extra/baseline.yaml"),
+		},
+		{
+			name: "lifecycle ends with the fleet file, without ExtraValues",
+			p:    pair{el: &chart.Element{ChartName: "lifecycle"}, cl: cl, fleetValues: true},
+			want: append(slices.Clone(cascadeFiles), "/fleet/built.yaml"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := valueFiles(slices.Clone(cascadeFiles), opts, tt.p); !slices.Equal(got, tt.want) {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSelectEngine(t *testing.T) {
+	hcp, hive := &chart.Element{StackKey: "hypershift"}, &chart.Element{StackKey: "hive"}
+	engines := []*chart.Element{hcp, hive}
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	defaults := write("values.yaml", "install:\n  engine: hypershift\n")
+	aws := write("aws.yaml", "install:\n  engine: hive\n")
+	other := write("other.yaml", "install:\n  platform: KubeVirt\nstack: {}\n")
+	unknown := write("unknown.yaml", "install:\n  engine: siteconfig\n")
+	tests := []struct {
+		name  string
+		files []string
+		want  *chart.Element
+	}{
+		{"chart default", []string{defaults, other}, hcp},
+		{"layer selects", []string{defaults, aws, other}, hive},
+		{"later layer wins", []string{defaults, aws, write("back.yaml", "install:\n  engine: hypershift\n")}, hcp},
+		{"missing file skipped", []string{defaults, aws, filepath.Join(dir, "absent.yaml")}, hive},
+		{"unknown engine falls back to the first", []string{defaults, unknown}, hcp},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := selectEngine(engines, tt.files); got != tt.want {
+				t.Errorf("got %q, want %q", got.StackKey, tt.want.StackKey)
+			}
+		})
+	}
+}
+
+func TestSetString(t *testing.T) {
+	el := &chart.Element{ChartName: "upgrade"}
+	tests := []struct {
+		name string
+		p    pair
+		want []string
+	}{
+		{"neither set", pair{el: el, cl: &fixtures.Cluster{}}, nil},
+		{"version only", pair{el: el, cl: &fixtures.Cluster{Version: "4.20.12"}}, []string{"version=4.20.12"}},
+		{"channel only", pair{el: el, cl: &fixtures.Cluster{Channel: "stable-4.20"}}, []string{"channel=stable-4.20"}},
+		{"both", pair{el: el, cl: &fixtures.Cluster{Version: "4.20.12", Channel: "stable-4.20"}}, []string{"version=4.20.12", "channel=stable-4.20"}},
+		{
+			name: "lifecycle reads the fleet file instead",
+			p:    pair{el: &chart.Element{ChartName: "lifecycle"}, cl: &fixtures.Cluster{Version: "4.20.12"}, fleetValues: true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := setString(tt.p); !slices.Equal(got, tt.want) {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWriteRender(t *testing.T) {
+	spoke := &fixtures.Cluster{Name: "x", SourceFile: "/fx/x.yaml"}
+	hub := &fixtures.Cluster{Name: "x", SourceFile: "/fx/hubs/x.yaml"}
+	el := &chart.Element{ChartName: "a"}
+	type write struct {
+		p      pair
+		out    string
+		failed *checks.Finding
+	}
+	tests := []struct {
+		name        string
+		fixturesDir string
+		writes      []write
+		want        map[string]string
+	}{
+		{
+			name:   "spoke",
+			writes: []write{{p: pair{el: el, cl: spoke}, out: "kind: Policy\n"}},
+			want:   map[string]string{"x/a.yaml": "kind: Policy\n"},
+		},
+		{
+			name: "hub and spoke share a name",
+			writes: []write{
+				{p: pair{el: el, cl: spoke}, out: "spoke\n"},
+				{p: pair{el: el, cl: hub}, out: "hub\n"},
+			},
+			want: map[string]string{"x/a.yaml": "spoke\n", "hubs/x/a.yaml": "hub\n"},
+		},
+		{
+			name:   "lifecycle",
+			writes: []write{{p: pair{el: &chart.Element{ChartName: "lifecycle"}, cl: spoke, fleetValues: true}, out: "l\n"}},
+			want:   map[string]string{"x/lifecycle.yaml": "l\n"},
+		},
+		{
+			name: "empty render writes nothing",
+			writes: []write{
+				{p: pair{el: el, cl: spoke}, out: ""},
+				{p: pair{el: el, cl: hub}, out: "\n \n"},
+			},
+			want: map[string]string{},
+		},
+		{
+			name: "failure as comments without the tree's paths",
+			writes: []write{{p: pair{el: el, cl: spoke}, out: "ignored", failed: &checks.Finding{
+				Message: "boom in /repo/stack/a/values.yaml\nand /fx/x.yaml",
+			}}},
+			want: map[string]string{"x/a.yaml": "# RENDER000: boom in stack/a/values.yaml\n# and x.yaml\n"},
+		},
+		{
+			name:        "relative fixtures dir with trailing slash",
+			fixturesDir: "fleet/",
+			writes:      []write{{p: pair{el: el, cl: &fixtures.Cluster{Name: "h", SourceFile: "fleet/hubs/h.yaml"}}, out: "h\n"}},
+			want:        map[string]string{"hubs/h/a.yaml": "h\n"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := Options{RepoRoot: "/repo", FixturesDir: cmp.Or(tt.fixturesDir, "/fx"), RenderDir: t.TempDir()}
+			for _, w := range tt.writes {
+				if err := writeRender(opts, w.p, []byte(w.out), w.failed); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got := map[string]string{}
+			err := filepath.WalkDir(opts.RenderDir, func(path string, d fs.DirEntry, err error) error {
+				if err != nil || d.IsDir() {
+					return err
+				}
+				b, err := os.ReadFile(path)
+				rel, _ := filepath.Rel(opts.RenderDir, path)
+				got[filepath.ToSlash(rel)] = string(b)
+				return err
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !maps.Equal(got, tt.want) {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDedupe(t *testing.T) {
+	layer := checks.Finding{RuleID: "POLICY032", Element: "a", File: "/v/prod.yaml", Line: 4, Message: "m"}
+	perCluster := checks.Finding{RuleID: "POLICY001", Element: "a", Cluster: "x", Message: "m"}
+	other := perCluster
+	other.Cluster = "y"
+	got := dedupe([]checks.Finding{layer, perCluster, layer, other, perCluster, layer})
+	if want := []checks.Finding{layer, perCluster, other}; !slices.Equal(got, want) {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestDependencyFailure(t *testing.T) {
+	const chartYAML = "apiVersion: v2\nname: a\nversion: 0.1.0\ndependencies:\n  - name: policy-library\n    version: ^4.0.0\n    repository: file://../../lib/policy-library\n"
+	tests := []struct {
+		name     string
+		archive  string // in stack/a/charts
+		only     string
+		want     []string // findings, "<rule> <element> <file>"
+		rendered bool     // stack/a is rendered
+	}{
+		{
+			name:    "stale archive is not rendered",
+			archive: "policy-library-3.3.0.tgz",
+			only:    "RENDER000",
+			want:    []string{"RENDER000 a stack/a/Chart.yaml"},
+		},
+		{name: "no archive", only: "RENDER000", want: []string{"RENDER000 a stack/a/Chart.yaml"}},
+		{name: "RENDER000 not run", archive: "policy-library-3.3.0.tgz", only: "POLICY081"},
+		// The library changes without a version change, so a matching archive is no reason to skip.
+		{name: "matching archive is not trusted", archive: "policy-library-4.0.0.tgz", only: "RENDER000", want: []string{"RENDER000 a stack/a/Chart.yaml"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			log := filepath.Join(root, "helm.log")
+			write := func(rel, body string, mode os.FileMode) {
+				p := filepath.Join(root, rel)
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte(body), mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// A helm whose dependency update fails for stack/a, as for a missing lib/policy-library.
+			write("helm", "#!/bin/sh\necho \"$*\" >> "+log+"\ncase \"$1 $4\" in dependency\\ */stack/a) echo 'Error: chart not found' >&2; exit 1;; esac\nexit 0\n", 0o755)
+			write("stack/a/Chart.yaml", chartYAML, 0o644)
+			write("stack/a/values.yaml", "stack:\n  a:\n    enabled: true\n", 0o644)
+			write("stack/b/Chart.yaml", "apiVersion: v2\nname: b\nversion: 0.1.0\n", 0o644)
+			write("stack/b/values.yaml", "stack:\n  b:\n    enabled: true\n", 0o644)
+			write("values.yaml", "policyNamespace: policies\n", 0o644)
+			write("fleet/c.yaml", "revision: main\n", 0o644)
+			if tt.archive != "" {
+				write("stack/a/charts/"+tt.archive, "", 0o644)
+			}
+			res, err := Run(t.Context(), Options{
+				RepoRoot:     root,
+				StackDir:     filepath.Join(root, "stack"),
+				LifecycleDir: filepath.Join(root, "lifecycle"),
+				ValuesDir:    filepath.Join(root, "values"),
+				FixturesDir:  filepath.Join(root, "fleet"),
+				HelmBin:      filepath.Join(root, "helm"),
+				RenderDir:    filepath.Join(root, "rd"),
+				Only:         []string{tt.only},
+				Logger:       slog.New(slog.DiscardHandler),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A failed fetch is written into the render, so a render diff shows a failure, not a deletion.
+			out, _ := os.ReadFile(filepath.Join(root, "rd/c/a.yaml"))
+			if failed := strings.HasPrefix(string(out), "# RENDER000: dependencies not fetched"); failed == tt.rendered {
+				t.Errorf("render of a = %q, want RENDER000 comment = %v", out, !tt.rendered)
+			}
+			var got []string
+			for _, f := range res.Findings {
+				rel, _ := filepath.Rel(root, f.File)
+				got = append(got, f.RuleID+" "+f.Element+" "+rel)
+				if !strings.Contains(f.Message, "Error: chart not found") {
+					t.Errorf("message %q does not carry helm's error", f.Message)
+				}
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("findings %q, want %q", got, tt.want)
+			}
+			calls, err := os.ReadFile(log)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(calls), "template b-c "+filepath.Join(root, "stack/b")) {
+				t.Errorf("b not rendered:\n%s", calls)
+			}
+			if got := strings.Contains(string(calls), "template a-c "); got != tt.rendered {
+				t.Errorf("a rendered = %v, want %v:\n%s", got, tt.rendered, calls)
+			}
+		})
+	}
+}
+
+// TestFleetIssueReportedOnce checks that a fleet file issue is one POLICY050, not one per element
+// and lifecycle pair.
+func TestFleetIssueReportedOnce(t *testing.T) {
+	for _, hub := range []string{"", "hub: acm-dc1\n"} {
+		t.Run("hub="+strings.TrimSpace(hub), func(t *testing.T) {
+			root := t.TempDir()
+			write := func(rel, body string, mode os.FileMode) {
+				p := filepath.Join(root, rel)
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte(body), mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write("helm", "#!/bin/sh\nexit 0\n", 0o755)
+			for _, el := range []string{"stack/a", "stack/b", "lifecycle"} {
+				name := filepath.Base(el)
+				write(el+"/Chart.yaml", "apiVersion: v2\nname: "+name+"\nversion: 0.1.0\n", 0o644)
+				write(el+"/values.yaml", "stack:\n  "+name+":\n    enabled: true\n", 0o644)
+			}
+			write("values.yaml", "policyNamespace: policies\n", 0o644)
+			write("fleet/c.yaml", "revision: main\n"+hub+"valueFiles: [environments/prd.yaml]\n", 0o644)
+			write("fleet/hubs/acm-dc1.yaml", "revision: main\n", 0o644)
+			res, err := Run(t.Context(), Options{
+				RepoRoot:     root,
+				StackDir:     filepath.Join(root, "stack"),
+				LifecycleDir: filepath.Join(root, "lifecycle"),
+				ValuesDir:    filepath.Join(root, "values"),
+				FixturesDir:  filepath.Join(root, "fleet"),
+				HelmBin:      filepath.Join(root, "helm"),
+				Only:         []string{"POLICY050"},
+				Logger:       slog.New(slog.DiscardHandler),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []checks.Finding{{
+				RuleID: "POLICY050", Severity: checks.SevError, Cluster: "c",
+				Message: `invalid fleet file: valueFiles "environments/prd.yaml": not a file under values/`,
+				File:    filepath.Join(root, "fleet/c.yaml"),
+			}}
+			if !slices.Equal(res.Findings, want) {
+				t.Errorf("got %+v, want %+v", res.Findings, want)
+			}
+		})
+	}
+}
+
+// TestPolicy051Wiring runs the check through Run: registration, the fleet files it reads, and that a
+// retired or import-only cluster does not count.
+func TestPolicy051Wiring(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, body string, mode os.FileMode) {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("helm", "#!/bin/sh\nexit 0\n", 0o755)
+	write("lifecycle/Chart.yaml", "apiVersion: v2\nname: lifecycle\nversion: 0.1.0\n", 0o644)
+	write("lifecycle/values.yaml", "stack:\n  siteconfig:\n    enabled: true\n", 0o644)
+	write("values.yaml", "policyNamespace: policies\n", 0o644)
+	nodes := "install:\n  siteconfig:\n    nodes:\n      h:\n        bootMACAddress: \"00:11:22:33:44:55\"\n        bmcAddress: redfish-virtualmedia://10.0.0.1/s\n"
+	write("fleet/a.yaml", "revision: main\nhub: acm-dc1\n"+nodes, 0o644)
+	write("fleet/b.yaml", "revision: main\nhub: acm-dc1\n"+nodes, 0o644)
+	write("fleet/c.yaml", "revision: main\nhub: acm-dc1\nstate: absent\n"+nodes, 0o644)
+	write("fleet/d.yaml", "revision: main\n", 0o644)
+	write("fleet/hubs/acm-dc1.yaml", "revision: main\n", 0o644)
+	res, err := Run(t.Context(), Options{
+		RepoRoot:     root,
+		StackDir:     filepath.Join(root, "stack"),
+		LifecycleDir: filepath.Join(root, "lifecycle"),
+		ValuesDir:    filepath.Join(root, "values"),
+		FixturesDir:  filepath.Join(root, "fleet"),
+		HelmBin:      filepath.Join(root, "helm"),
+		Only:         []string{"POLICY051"},
+		Logger:       slog.New(slog.DiscardHandler),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Findings) != 2 {
+		t.Fatalf("got %+v, want MAC and BMC findings on b", res.Findings)
+	}
+	for _, f := range res.Findings {
+		if f.Cluster != "b" || f.RuleID != "POLICY051" {
+			t.Errorf("finding %+v", f)
+		}
+	}
+}
+
+// TestV3Chart checks that a policy-library 3.x chart is rendered and reported only by POLICY031,
+// while a 4.0 chart beside it is checked as usual.
+func TestV3Chart(t *testing.T) {
+	root := t.TempDir()
+	log := filepath.Join(root, "helm.log")
+	write := func(rel, body string, mode os.FileMode) {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("helm", "#!/bin/sh\necho \"$*\" >> "+log+"\nexit 0\n", 0o755)
+	for _, name := range []string{"old", "new"} {
+		write("stack/"+name+"/Chart.yaml", "apiVersion: v2\nname: "+name+"\nversion: 0.1.0\n", 0o644)
+		write("stack/"+name+"/converters/flat.yaml", "kind: ConfigMap\n", 0o644)
+	}
+	write("stack/old/values.yaml", `stack:
+  old:
+    enabled: true
+    toggles: {cm: true}
+    policies:
+      - name: install
+    configPolicies:
+      - name: cm
+        policyRef: install
+        remediationAction: enforce
+        templateNames: [flat]
+`, 0o644)
+	write("stack/new/values.yaml", "stack:\n  new:\n    enabled: true\n", 0o644)
+	write("values.yaml", "policyNamespace: policies\n", 0o644)
+	write("values/x.yaml", "stack:\n  old:\n    toggles: {cm: false}\n", 0o644)
+	write("fleet/c.yaml", "revision: main\n", 0o644)
+	res, err := Run(t.Context(), Options{
+		RepoRoot:     root,
+		StackDir:     filepath.Join(root, "stack"),
+		LifecycleDir: filepath.Join(root, "lifecycle"),
+		ValuesDir:    filepath.Join(root, "values"),
+		FixturesDir:  filepath.Join(root, "fleet"),
+		HelmBin:      filepath.Join(root, "helm"),
+		Only:         []string{"POLICY021", "POLICY030", "POLICY031", "POLICY035", "RENDER000"},
+		Logger:       slog.New(slog.DiscardHandler),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, f := range res.Findings {
+		got = append(got, f.RuleID+" "+f.Element)
+	}
+	slices.Sort(got)
+	if want := []string{"POLICY021 new", "POLICY031 old"}; !slices.Equal(got, want) {
+		t.Errorf("findings %q, want %q", got, want)
+	}
+	calls, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(calls), "template old-c "+filepath.Join(root, "stack/old")) {
+		t.Errorf("old not rendered:\n%s", calls)
+	}
+}
+
+func TestFilterRules(t *testing.T) {
+	all := checks.All()
+	tests := []struct {
+		name       string
+		only, skip []string
+		want       []string // rule IDs kept; nil with wantErr
+		wantErr    string
+	}{
+		{name: "all", want: ruleIDs(all)},
+		{name: "only", only: []string{"POLICY081", "RENDER000"}, want: []string{"POLICY081", "RENDER000"}},
+		{name: "skip", skip: []string{"POLICY080"}, want: slices.DeleteFunc(ruleIDs(all), func(id string) bool { return id == "POLICY080" })},
+		{name: "only wins over skip", only: []string{"POLICY060"}, skip: []string{"POLICY060"}, want: []string{"POLICY060"}},
+		{name: "unknown only", only: []string{"RENDER000", "POLICY81"}, wantErr: `--only: unknown rule ID "POLICY81"`},
+		{name: "unknown skip", skip: []string{"policy080"}, wantErr: `--skip: unknown rule ID "policy080"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := filterRules(all, Options{Only: tt.only, Skip: tt.skip})
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ids := ruleIDs(got); !slices.Equal(ids, tt.want) {
+				t.Errorf("got %v, want %v", ids, tt.want)
+			}
+		})
+	}
+}
+
+// TestLoadCRDs: missing CRDs skip POLICY080 locally and fail the run under CI.
+func TestLoadCRDs(t *testing.T) {
+	empty := t.TempDir()
+	tests := []struct {
+		name, ci string
+		opts     Options
+		wantErr  bool
+	}{
+		{name: "no dir", ci: "true", opts: Options{}},
+		{name: "skipped", ci: "true", opts: Options{CRDsDir: empty, Skip: []string{"POLICY080"}}},
+		{name: "not selected", ci: "true", opts: Options{CRDsDir: empty, Only: []string{"RENDER000"}}},
+		{name: "missing locally", opts: Options{CRDsDir: empty}},
+		{name: "missing in CI", ci: "true", opts: Options{CRDsDir: empty}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CI", tt.ci)
+			tt.opts.Logger = slog.New(slog.DiscardHandler)
+			crds, err := loadCRDs(tt.opts)
+			if (err != nil) != tt.wantErr || crds != nil {
+				t.Errorf("got %v, %v; want error %v and no CRDs", crds, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestAllOn checks that --all-on ranks the all-on profile of every element below ExtraValues, and
+// removes it after the run.
+func TestAllOn(t *testing.T) {
+	for _, allOn := range []bool{false, true} {
+		t.Run(fmt.Sprint(allOn), func(t *testing.T) {
+			root := t.TempDir()
+			log := filepath.Join(root, "helm.log")
+			write := func(rel, body string, mode os.FileMode) {
+				p := filepath.Join(root, rel)
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte(body), mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Logs each template call's -f files, and the content of the first.
+			write("helm", "#!/bin/sh\n[ \"$1\" = template ] || exit 0\nshift 3\nfiles=\nwhile [ $# -gt 0 ]; do [ \"$1\" = -f ] && files=\"$files $2\"; shift; done\n"+
+				"echo \"$files\" >> "+log+"\nset -- $files\nfor f; do case $f in */all-on-*) cat \"$f\" >> "+log+";; esac; done\n", 0o755)
+			write("stack/a/Chart.yaml", "apiVersion: v2\nname: a\nversion: 0.1.0\n", 0o644)
+			write("stack/a/values.yaml", "stack:\n  a:\n    enabled: false\n    policies:\n      p:\n        enabled: false\n", 0o644)
+			write("values.yaml", "policyNamespace: policies\n", 0o644)
+			write("extra.yaml", "selector: {}\n", 0o644)
+			write("fleet/c.yaml", "revision: main\n", 0o644)
+			_, err := Run(t.Context(), Options{
+				RepoRoot:     root,
+				StackDir:     filepath.Join(root, "stack"),
+				LifecycleDir: filepath.Join(root, "lifecycle"),
+				ValuesDir:    filepath.Join(root, "values"),
+				FixturesDir:  filepath.Join(root, "fleet"),
+				HelmBin:      filepath.Join(root, "helm"),
+				ExtraValues:  []string{filepath.Join(root, "extra.yaml")},
+				AllOn:        allOn,
+				Only:         []string{"RENDER000"},
+				Logger:       slog.New(slog.DiscardHandler),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls, err := os.ReadFile(log)
+			if err != nil {
+				t.Fatal(err)
+			}
+			files := strings.Fields(strings.SplitN(string(calls), "\n", 2)[0])
+			want := []string{filepath.Join(root, "stack/a/values.yaml"), filepath.Join(root, "values.yaml"), filepath.Join(root, "extra.yaml")}
+			if allOn {
+				if len(files) != 4 || !strings.Contains(files[2], "all-on-") {
+					t.Fatalf("value files %q: want the all-on profile third", files)
+				}
+				if _, err := os.Stat(files[2]); !os.IsNotExist(err) {
+					t.Errorf("all-on profile %s not removed: %v", files[2], err)
+				}
+				want = slices.Insert(want, 2, files[2])
+				if !strings.Contains(string(calls), "stack:\n    a:\n        enabled: true\n        policies:\n            p:\n                enabled: true\n") {
+					t.Errorf("all-on profile does not turn a and its policy on:\n%s", calls)
+				}
+			}
+			if !slices.Equal(files, want) {
+				t.Errorf("value files %q, want %q", files, want)
+			}
+		})
+	}
+}
+
+// TestPolicy011Wiring runs the check through Run: a missing element: target is reported only when a
+// fleet file's render, --all-on included, holds the Policy naming it. The stand-in helm renders
+// Policy p for release a-c when a values file turns something on.
+func TestPolicy011Wiring(t *testing.T) {
+	for _, tc := range []struct {
+		name, clusterFile string
+		allOn, want       bool
+	}{
+		{name: "disabled everywhere"},
+		{name: "cluster file enables it", clusterFile: "stack:\n  a:\n    enabled: true\n", want: true},
+		{name: "all-on", allOn: true, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			write := func(rel, body string, mode os.FileMode) {
+				p := filepath.Join(root, rel)
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte(body), mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write("helm", "#!/bin/sh\n[ \"$1\" = template ] || exit 0\nfor f; do [ -f \"$f\" ] && cat \"$f\"; done | grep -q 'enabled: true' && printf 'kind: Policy\\nmetadata:\\n  name: p-a-c\\n'\nexit 0\n", 0o755)
+			write("stack/a/Chart.yaml", "apiVersion: v2\nname: a\nversion: 0.1.0\n", 0o644)
+			write("stack/a/values.yaml", "stack:\n  a:\n    enabled: false\n    policies:\n      p:\n        dependencies:\n          - name: ready\n            element: odf\n", 0o644)
+			write("values.yaml", "policyNamespace: policies\n", 0o644)
+			write("fleet/c.yaml", "revision: main\n", 0o644)
+			if tc.clusterFile != "" {
+				write("values/clusters/c.yaml", tc.clusterFile, 0o644)
+			}
+			res, err := Run(t.Context(), Options{
+				RepoRoot:     root,
+				StackDir:     filepath.Join(root, "stack"),
+				LifecycleDir: filepath.Join(root, "lifecycle"),
+				ValuesDir:    filepath.Join(root, "values"),
+				FixturesDir:  filepath.Join(root, "fleet"),
+				HelmBin:      filepath.Join(root, "helm"),
+				AllOn:        tc.allOn,
+				Only:         []string{"POLICY011"},
+				Logger:       slog.New(slog.DiscardHandler),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := len(res.Findings) == 1 && strings.Contains(res.Findings[0].Message, `names element "odf"`); got != tc.want || len(res.Findings) > 1 {
+				t.Errorf("findings %+v, want reported=%v", res.Findings, tc.want)
+			}
+		})
+	}
+}

@@ -1,0 +1,30 @@
+stack:
+  logging:
+    enabled: false
+
+    default:
+      remediationAction: enforce
+      severity: medium
+      categories:
+        - CM Configuration Management
+      controls:
+        - CM-2 Baseline Configuration
+      standards:
+        - NIST SP 800-53
+
+    policies:
+      install:
+        description: "Policy for any operator installation"
+
+    operatorPolicies:
+      cluster-logging:
+        description: "Installs the OpenShift logging operator"
+        displayName: "Red Hat OpenShift Logging"
+        severity: high
+        namespace: openshift-logging
+        operatorGroup:
+          name: openshift-logging-group
+        subscription:
+          channel: stable-6.5
+          name: cluster-logging
+        versions: []

@@ -1,0 +1,31 @@
+stack:
+  tempo:
+    enabled: false
+
+    default:
+      remediationAction: enforce
+      severity: medium
+      categories:
+        - CM Configuration Management
+      controls:
+        - CM-2 Baseline Configuration
+      standards:
+        - NIST SP 800-53
+
+    policies:
+      install:
+        description: "Install and manage Red Hat build of Tempo"
+
+    operatorPolicies:
+      tempo:
+        description: "Red Hat build of Tempo for distributed tracing storage"
+        # Must match the CSV displayName so the generated status check can find it
+        displayName: "Tempo Operator"
+        namespace: openshift-operators
+        operatorGroup:
+          # Reuse the namespace's existing cluster-scoped OperatorGroup; a second one breaks OLM
+          name: global-operators
+        subscription:
+          channel: stable
+          name: tempo-product
+        versions: []

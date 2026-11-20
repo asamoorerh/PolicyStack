@@ -1,0 +1,31 @@
+stack:
+  devSpaces:
+    enabled: false
+
+    default:
+      remediationAction: enforce
+      severity: medium
+      categories:
+        - CM Configuration Management
+      controls:
+        - CM-2 Baseline Configuration
+      standards:
+        - NIST SP 800-53
+
+    policies:
+      install:
+        description: "Install and manage Red Hat OpenShift Dev Spaces"
+
+    operatorPolicies:
+      devspaces:
+        description: "Red Hat OpenShift Dev Spaces cloud development environments"
+        # Must match the CSV displayName so the generated status check can find it
+        displayName: "Red Hat OpenShift Dev Spaces"
+        namespace: openshift-operators-redhat
+        operatorGroup:
+          # Reuse the namespace's existing cluster-scoped OperatorGroup; a second one breaks OLM
+          name: openshift-operators-redhat
+        subscription:
+          channel: stable
+          name: devspaces
+        versions: []

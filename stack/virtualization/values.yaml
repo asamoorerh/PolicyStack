@@ -1,0 +1,47 @@
+stack:
+  virtualization:
+    enabled: false
+
+    default:
+      remediationAction: enforce
+      severity: medium
+      categories:
+        - CM Configuration Management
+      controls:
+        - CM-2 Baseline Configuration
+      standards:
+        - NIST SP 800-53
+
+    policies:
+      # Operator install
+      install:
+        description: "Install and manage the OpenShift Virtualization operator"
+
+      # The HyperConverged operand, applied once the operator is ready
+      config:
+        description: "Deploy the HyperConverged instance"
+        # The HyperConverged CRD only exists after the operator installs
+        dependencies:
+          - name: install
+        templates:
+          # HyperConverged operand
+          hyperconverged:
+            description: "HyperConverged instance"
+            # Wait for the operator's CSV; the CRD only exists after install
+            waitForOperator: virt
+
+    operatorPolicies:
+      virt:
+        description: "OpenShift Virtualization"
+        displayName: "OpenShift Virtualization"
+        namespace: openshift-cnv
+        clusterMonitoring: true
+        operatorGroup:
+          name: kubevirt-hyperconverged-group
+          # Own-namespace install mode
+          targetNamespaces:
+            - openshift-cnv
+        subscription:
+          channel: stable
+          name: kubevirt-hyperconverged
+        versions: []

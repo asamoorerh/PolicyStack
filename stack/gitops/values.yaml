@@ -1,0 +1,97 @@
+stack:
+  gitops:
+    enabled: false
+
+    config:
+      # Namespace the platform ArgoCD instance runs in
+      namespace: openshift-gitops
+      # Disable the built-in admin account and rely on OpenShift OAuth
+      disableAdmin: false
+      # Expose ArgoCD metrics to the monitoring stack
+      monitoring: false
+      # Kustomize flags. Enables Helm. PolicyStack does not use the PolicyGenerator plugin.
+      kustomizeBuildOptions: --enable-helm --helm-command /usr/local/bin/helm
+      # ArgoCD RBAC, one CSV line per entry
+      rbacPolicies:
+        - "g, cluster-admins, role:admin"
+        - "g, system:cluster-admins, role:admin"
+      ha:
+        # Run Redis in HA mode. Needs at least three nodes.
+        enabled: false
+      serverAutoscale:
+        enabled: false
+        maxReplicas: 10
+        targetCPUUtilizationPercentage: 50
+      # Per-component resource requests and limits
+      resources:
+        server:
+          requests: {cpu: 125m, memory: 128Mi}
+          limits: {cpu: 500m, memory: 256Mi}
+        repo:
+          requests: {cpu: 250m, memory: 256Mi}
+          limits: {cpu: "1", memory: 1024Mi}
+        controller:
+          requests: {cpu: 250m, memory: 1Gi}
+          limits: {cpu: "2", memory: 2Gi}
+        applicationSet:
+          requests: {cpu: 125m, memory: 128Mi}
+          limits: {cpu: "1", memory: 512Mi}
+        dex:
+          requests: {cpu: 125m, memory: 128Mi}
+          limits: {cpu: 500m, memory: 256Mi}
+        redis:
+          requests: {cpu: 250m, memory: 128Mi}
+          limits: {cpu: 500m, memory: 256Mi}
+        ha:
+          requests: {cpu: 250m, memory: 128Mi}
+          limits: {cpu: 500m, memory: 256Mi}
+
+    default:
+      remediationAction: enforce
+      severity: medium
+      categories:
+        - CM Configuration Management
+      controls:
+        - CM-2 Baseline Configuration
+      standards:
+        - NIST SP 800-53
+
+    policies:
+      install:
+        description: "Install and manage the OpenShift GitOps operator"
+
+      # Deploy the platform ArgoCD instance. Disable to install only the operator.
+      instance:
+        description: "Platform ArgoCD instance"
+        dependencies:
+          - name: install
+        templates:
+          # Mount the cluster's trusted CA bundle into the repo server, so it trusts Git and Helm servers signed by the proxy's trustedCA
+          ca-bundle:
+            description: "Trusted CA bundle for ArgoCD"
+
+          argocd:
+            description: "ArgoCD instance"
+            waitForOperator: gitops
+
+      # Publish a console link to ArgoCD
+      link:
+        description: "Console link to ArgoCD"
+        severity: low
+        dependencies:
+          - name: instance
+        templates:
+          argocd-console:
+            description: "ArgoCD console link"
+            config:
+              consoleText: Red Hat OpenShift GitOps
+
+    operatorPolicies:
+      gitops:
+        description: "OpenShift GitOps operator"
+        displayName: "Red Hat OpenShift GitOps"
+        namespace: openshift-gitops-operator
+        subscription:
+          channel: latest
+          name: openshift-gitops-operator
+        versions: []

@@ -1,0 +1,201 @@
+stack:
+  acs:
+    enabled: false
+
+    config:
+      # Scanner V4 component state: Enabled, Default or Disabled
+      scannerV4: Enabled
+      # Central egress posture: Online or Offline
+      egressConnectivity: Online
+      # Let the operator manage its NetworkPolicies: Enabled or Disabled. Empty leaves it unset.
+      networkPolicies: ""
+      # Wire ACS into OpenShift monitoring. Leave unset to use the operator default.
+      monitoring: null
+      # Central scanner autoscaling
+      scanner:
+        minReplicas: 2
+        maxReplicas: 5
+        replicas: 3
+      # Authentication wired in declaratively at Central startup
+      auth:
+        # Auth provider to declare. Empty disables declarative auth config entirely.
+        provider: openshift
+        # Role granted to any authenticated user
+        minimumRole: None
+        # OpenShift groups mapped to the ACS roles their members get, as group: [roles]. Roles are
+        # ACS built-ins (Admin, Analyst, ...). Set a group to null in a later layer to drop it.
+        groups:
+          cluster-admins:
+            - Admin
+      # Admission control behaviour on secured clusters
+      admissionControl:
+        # Enforce deploy-time policies (SecuredCluster admissionControl.enforcement). Off by
+        # default: it sits in the admission path. The operator itself defaults it on.
+        enabled: false
+        # ScanIfMissing or DoNotScanInline. Ignored by ACS 4.9+.
+        contactImageScanners: ScanIfMissing
+        # What happens if the admission webhook is unreachable: Ignore or Fail
+        failurePolicy: Ignore
+      # Node collector
+      collector:
+        # CORE_BPF or NoCollection
+        collection: CORE_BPF
+      # SecurityPolicy objects keyed by name; edit, extend or replace per cluster.
+      securityPolicies:
+        no-privilege-escalation:
+          policyName: No Privilege Escalation
+          categories:
+            - Privileges
+          severity: HIGH_SEVERITY
+          disabled: false
+          lifecycleStages:
+            - DEPLOY
+          policySections:
+            - sectionName: Rule 1
+              policyGroups:
+                - fieldName: Allow Privilege Escalation
+                  values:
+                    - value: 'true'
+          enforcementActions: []
+        no-root-user-containers:
+          policyName: No Root User Containers
+          categories:
+            - Privileges
+          severity: HIGH_SEVERITY
+          disabled: false
+          lifecycleStages:
+            - DEPLOY
+          policySections:
+            - sectionName: Rule 1
+              policyGroups:
+                - fieldName: Image User
+                  values:
+                    - value: '0'
+                    - value: root
+          enforcementActions: []
+        no-shell-spawning:
+          policyName: No Shell Spawning at Runtime
+          categories:
+            - System Modification
+          severity: HIGH_SEVERITY
+          disabled: false
+          lifecycleStages:
+            - RUNTIME
+          eventSource: DEPLOYMENT_EVENT
+          policySections:
+            - sectionName: Rule 1
+              policyGroups:
+                - fieldName: Process Name
+                  values:
+                    - value: /bin/sh
+                    - value: /bin/bash
+                    - value: /bin/dash
+          enforcementActions: []
+
+    default:
+      remediationAction: enforce
+      severity: high
+      categories:
+        - SI System and Information Integrity
+        - CM Configuration Management
+      controls:
+        - SI-3 Malicious Code Protection
+        - CM-6 Configuration Settings
+      standards:
+        - NIST SP 800-53
+
+    # `central` and `secured` pick the ACS role this cluster plays. Turn `central` on
+    # in values/acm/*.yaml and `secured` on wherever ACS agents should run.
+    policies:
+      install:
+        description: "Install and manage the ACS operator"
+        severity: medium
+
+      # Run Central here (the ACS hub). Only on the ACM hub itself, once per hub. Also brings
+      # the declarative auth config, security policies and a check that the hub holds a
+      # cluster registration secret (CRS) with over 90 days left; you generate it once, see
+      # docs/elements/acs.md.
+      central:
+        enabled: false
+        description: "Central, its declarative auth config and security policies"
+        dependencies:
+          - name: install
+        templates:
+          # Central itself, plus the config it reads at startup
+          central:
+            description: "Central and its declarative configuration"
+            file:
+              - _shared/acs-namespace
+              - central/central
+            waitForOperator: acs
+
+          central-ready:
+            description: "Central readiness"
+            remediationAction: InformOnly
+            severity: medium
+
+          policies:
+            description: "SecurityPolicy objects"
+            severity: medium
+            extraDependencies:
+              - name: central-ready
+            ignorePending: true
+
+          crs-ready:
+            description: "The hub holds a CRS with over 90 days left"
+            remediationAction: InformOnly
+            severity: medium
+            # Polls instead of watching: the expiry check compares against now
+            evaluationInterval:
+              compliant: 24h
+              noncompliant: 10m
+
+          # Lets the secured policy's hub templates read the CRS, Central's Route and ManagedCluster labels
+          hub-access:
+            description: "ServiceAccount and RBAC for the secured policy's hub templates"
+
+          # Publish a console link to Central. Only meaningful where Central runs.
+          console:
+            description: "Console link to Central"
+            severity: low
+
+      # Run the secured-cluster agents here. Usually every cluster, including the hub. A
+      # rebuilt, moved or re-created cluster must be re-registered: see docs/elements/acs.md.
+      secured:
+        enabled: false
+        description: "Secured-cluster agents and their TLS material"
+        dependencies:
+          - name: install
+        # The hub templates read hubNamespace, outside the policy namespace. The central
+        # policy's hub-access creates this ServiceAccount; keep the two names in sync.
+        hubTemplateOptions:
+          serviceAccountName: acs-hub-templates
+        templates:
+          # The CRS copied down from the hub, then the SecuredCluster itself
+          tls:
+            description: "Cluster registration secret from the hub"
+            file:
+              - _shared/acs-namespace
+              - secured/tls
+
+          agents:
+            description: "SecuredCluster agents"
+            waitForOperator: acs
+            # The CRS must exist before sensor can register
+            extraDependencies:
+              - name: tls
+
+          agents-ready:
+            description: "SecuredCluster readiness"
+            remediationAction: InformOnly
+            severity: medium
+
+    operatorPolicies:
+      acs:
+        description: "Advanced Cluster Security operator"
+        displayName: "Advanced Cluster Security for Kubernetes"
+        namespace: rhacs-operator
+        subscription:
+          channel: stable
+          name: rhacs-operator
+        versions: []

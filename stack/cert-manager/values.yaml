@@ -1,0 +1,116 @@
+stack:
+  certManager:
+    enabled: false
+
+    config:
+      # Name of the CA Certificate and the ClusterIssuer that signs from it
+      caName: policystack-ca
+      # Signer for the CA. Leave name empty for a self-signed root; point it at your own
+      # Issuer/ClusterIssuer to make the CA an intermediate instead.
+      caIssuer:
+        name: ""
+        kind: ClusterIssuer
+        group: cert-manager.io
+      # CA lifetime. Roots are long-lived; the serving certs they sign rotate.
+      caDuration: 17520h0m0s
+      # Renew the CA this far before expiry
+      caRenewBefore: 2160h0m0s
+      # Lifetime of the serving certificates
+      leafDuration: 8760h
+      # Renew serving certificates this far before expiry
+      leafRenewBefore: 720h
+      # Private key algorithm for every certificate issued here
+      keyAlgorithm: ECDSA
+      # P-384 is FIPS 140-approved and suits FedRAMP High
+      keySize: 384
+      # API serving certificate settings
+      apiCert:
+        # Additional SANs beyond api.<domain>
+        extraSANs: []
+        # Override the issuer; defaults to the cluster CA above
+        issuer: {}
+      # Ingress wildcard certificate settings
+      ingressCert:
+        # Additional SANs beyond *.apps.<domain> and apps.<domain>
+        extraSANs: []
+        # Override the issuer; defaults to the cluster CA above
+        issuer: {}
+
+    default:
+      remediationAction: enforce
+      severity: medium
+      categories:
+        - CM Configuration Management
+        - SC System and Communications Protection
+      controls:
+        - CM-2 Baseline Configuration
+        - SC-12 Cryptographic Key Establishment and Management
+      standards:
+        - NIST SP 800-53
+
+    # Each sub-feature is its own policy so it can be ordered and enabled independently.
+    policies:
+      # Install and manage the cert-manager Operator
+      install:
+        description: "Install and manage the cert-manager Operator"
+
+      # Cluster CA issuer, signing every certificate below. On by default; it is the
+      # cluster's default TLS issuer.
+      ca:
+        description: "Cluster CA ClusterIssuer used as the default TLS issuer"
+        # The CRDs must exist before any cert-manager resource can be applied
+        dependencies:
+          - name: install
+        templates:
+          # The CA Certificate and ClusterIssuer, plus a self-signed root when no
+          # external signer is configured
+          ca-issuer:
+            description: "Cluster CA Certificate and ClusterIssuer"
+
+      # Replace the external API serving cert (api.<domain>). Additive and SNI-matched.
+      api-cert:
+        enabled: false
+        description: "cert-manager-managed API server serving certificate"
+        dependencies:
+          - name: ca
+        templates:
+          # API serving certificate, and the APIServer patch once it is Ready
+          api-certificate:
+            description: "API server serving certificate (additive, SNI-matched)"
+
+          # Inform-only readiness signal for the API certificate
+          api-ready:
+            description: "Reports NonCompliant while the API certificate is not Ready"
+            remediationAction: InformOnly
+
+      # Replace the default Ingress wildcard cert (*.apps.<domain>). Higher blast radius.
+      ingress-cert:
+        enabled: false
+        description: "cert-manager-managed default Ingress wildcard certificate"
+        dependencies:
+          - name: ca
+        templates:
+          # Ingress wildcard certificate, and the IngressController patch once Ready
+          ingress-certificate:
+            description: "Default Ingress wildcard certificate (replaces *.apps)"
+
+          # Inform-only readiness signal for the Ingress certificate
+          ingress-ready:
+            description: "Reports NonCompliant while the Ingress certificate is not Ready"
+            remediationAction: InformOnly
+
+    # OperatorPolicy installing the cert-manager subscription
+    operatorPolicies:
+      cert-manager:
+        description: "cert-manager Operator (Red Hat build)"
+        displayName: "cert-manager Operator for Red Hat OpenShift"
+        namespace: cert-manager-operator
+        clusterMonitoring: true
+        operatorGroup:
+          name: cert-manager-operator-group
+          targetNamespaces:
+            - cert-manager-operator
+        subscription:
+          channel: stable-v1
+          name: openshift-cert-manager-operator
+        versions: []

@@ -1,0 +1,55 @@
+stack:
+  mtv:
+    enabled: false
+
+    config:
+      # Expose the Forklift console plugin
+      uiPlugin: true
+      # Run the validation service
+      validation: true
+      # Enable the volume populator for disk transfer
+      volumePopulator: true
+
+    default:
+      remediationAction: enforce
+      severity: medium
+      categories:
+        - CM Configuration Management
+      controls:
+        - CM-2 Baseline Configuration
+      standards:
+        - NIST SP 800-53
+
+    policies:
+      # Operator install
+      install:
+        description: "Install and manage the Migration Toolkit for Virtualization operator"
+
+      # The ForkliftController operand, applied once the operator is ready
+      config:
+        description: "Deploy the ForkliftController instance"
+        # The ForkliftController CRD only exists after the operator installs
+        dependencies:
+          - name: install
+        templates:
+          # ForkliftController operand
+          forklift:
+            description: "ForkliftController instance"
+            # Wait for the operator's CSV; the CRD only exists after install
+            waitForOperator: mtv
+
+    operatorPolicies:
+      mtv:
+        description: "Migration Toolkit for Virtualization"
+        displayName: "Migration Toolkit for Virtualization Operator"
+        namespace: openshift-mtv
+        clusterMonitoring: true
+        operatorGroup:
+          name: migration
+          # Own-namespace install mode
+          targetNamespaces:
+            - openshift-mtv
+        subscription:
+          channel: release-v2.10
+          name: mtv-operator
+        versions: []

@@ -1,0 +1,13 @@
+{{- /*
+Rendered once per fleet file that sets hub (install/templates/lifecycle.yaml). Without hub,
+as under helm lint, nothing renders. install.engine picks the stack component, and state which of
+its two Policies renders.
+*/ -}}
+{{- if .Values.hub }}
+{{- $engine := .Values.install.engine }}
+{{- $policies := (index .Values.stack $engine).policies }}
+{{- $_ := set $policies.present "enabled" (eq .Values.state "present") }}
+{{- $_ = set $policies.absent "enabled" (eq .Values.state "absent") }}
+{{- $_ = set $policies.present.templates.precheck "enabled" (not (empty .Values.install.precheck)) }}
+{{- include "policy-library.render" (merge (dict "component" $engine) .) }}
+{{- end }}

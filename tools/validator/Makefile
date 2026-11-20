@@ -1,0 +1,115 @@
+BINARY := bin/policystack-validator
+PKG := ./cmd/policystack-validator
+ROOT := ../..
+# validate runs from the repo root, where CI annotations and --extra-values paths resolve. ELEMENT
+# limits validate and preview to one chart. BASE_BRANCH is the branch HEAD merges into: POLICY052
+# resolves a revision naming it to HEAD, and a repository without an origin remote needs it.
+VALIDATOR := $(abspath $(BINARY)) --repo-root . $(if $(CI),--github) $(if $(ELEMENT),--element $(ELEMENT)) $(if $(BASE_BRANCH),--base-branch $(BASE_BRANCH))
+BASELINE := tools/validator/testdata/baseline.yaml
+# Upstream's example fleet. copier leaves it out of a copy, so an adopter's validate checks fleet/ only.
+FIXTURES := tools/validator/testdata/clusters
+# Config the all-on run needs (pass 2 of validate).
+INPUTS := tools/validator/testdata/inputs.yaml
+# Every chart that depends on policy-library, TestConformance's fixture included.
+CHARTS := $(patsubst %/Chart.yaml,%,$(wildcard $(ROOT)/stack/*/Chart.yaml)) $(ROOT)/lifecycle $(ROOT)/tools/sample-element internal/chart/testdata/element
+
+.PHONY: build test lint fmt clean run tidy deps crds validate preview ci
+
+# CRDs POLICY080 validates rendered objects against, at the ACM 2.16 floor (docs/develop/validation.md#crd-schemas),
+# committed in crds/ so validate runs offline. Upstream's Renovate bumps each SHA to its branch head;
+# the branches move with the floor, by hand. After either, run make crds and commit crds/: upstream CI fails while
+# crds/ differs from the pinned files.
+CRDS := crds
+# renovate: datasource=git-refs depName=https://github.com/stolostron/governance-policy-propagator branch=release-2.16
+PROPAGATOR_SHA ?= 2d03f8350c7da2a7a40892f11c88e91bb843abaf
+# renovate: datasource=git-refs depName=https://github.com/stolostron/config-policy-controller branch=release-2.16
+CPC_SHA ?= 815433ad946667d33eb3fdc93659049fa403b0bc
+# renovate: datasource=git-refs depName=https://github.com/stolostron/cert-policy-controller branch=release-2.16
+CERT_SHA ?= b274b410e6fa824b20cca59ab32d359320beed86
+# The open-cluster-management.io/api version propagator release-2.16 requires (v1.2.0).
+# renovate: datasource=git-refs depName=https://github.com/open-cluster-management-io/api branch=release-1.2
+OCM_API_SHA ?= b449b3b4e4b95955b76c2babed59cae51e70fe53
+RAW := https://raw.githubusercontent.com
+CRD_URLS := \
+	$(foreach k,policies placementbindings policysets,$(RAW)/stolostron/governance-policy-propagator/$(PROPAGATOR_SHA)/deploy/crds/policy.open-cluster-management.io_$(k).yaml) \
+	$(foreach k,configurationpolicies operatorpolicies,$(RAW)/stolostron/config-policy-controller/$(CPC_SHA)/deploy/crds/policy.open-cluster-management.io_$(k).yaml) \
+	$(RAW)/stolostron/cert-policy-controller/$(CERT_SHA)/deploy/crds/policy.open-cluster-management.io_certificatepolicies.yaml \
+	$(RAW)/open-cluster-management-io/api/$(OCM_API_SHA)/cluster/v1beta1/0000_02_clusters.open-cluster-management.io_placements.crd.yaml
+
+build:
+	go build -trimpath -o $(BINARY) $(PKG)
+
+test:
+	go test -race ./...
+
+# golangci-lint also reports gofmt and goimports drift (.golangci.yml); make fmt fixes it.
+lint:
+	golangci-lint run
+	go mod tidy -diff
+	go tool govulncheck ./...
+
+fmt:
+	golangci-lint fmt
+
+tidy:
+	go mod tidy
+
+clean:
+	rm -rf bin
+
+run: build
+	./$(BINARY) --repo-root ../..
+
+# Packages lib/policy-library into every chart's charts/ ahead of time. validate does it on every run.
+deps:
+	@for c in $(CHARTS); do helm dependency update --skip-refresh $$c >/dev/null || exit 1; done
+
+# Run by hand: refetches crds/ from the pinned SHAs.
+crds:
+	@rm -rf $(CRDS) && mkdir -p $(CRDS) && \
+	for u in $(CRD_URLS); do curl -fsSL --retry 3 -o "$(CRDS)/$${u##*/}" "$$u" || exit 1; done
+
+# Three passes, all run, any failure fails. Passes 1 and 2 render the fixtures, so they run only
+# where FIXTURES exists (upstream):
+# 1. Fixture clusters plus tools/sample-element. POLICY081 runs in pass 2, where every converter
+#    renders. POLICY071 (install/) runs here, or in pass 3 where FIXTURES doesn't exist.
+# 2. --all-on turns every element and policy on, tools/sample-element too, under INPUTS; then each
+#    testdata/profiles file alone (docs/develop/validation.md#profiles). In CI, sort -u drops the
+#    annotations two runs both report.
+# 3. A copy's real fleet, when it has one. Upstream ships none. POLICY052 (fleet pins) runs here
+#    only: the fixtures' revisions are not real pins.
+validate: build
+	@cd $(ROOT) && failed=0; skip=; \
+	if [ -d $(FIXTURES) ]; then \
+	  skip="--skip POLICY071"; \
+	  $(VALIDATOR) --extra-values $(BASELINE) --include-sample-element --skip POLICY052,POLICY081 || failed=1; \
+	  acm=$$(mktemp); \
+	  $(VALIDATOR) --all-on --extra-values $(BASELINE),$(INPUTS) --include-sample-element --skip POLICY052,POLICY071 >> "$$acm" || failed=1; \
+	  for p in tools/validator/testdata/profiles/*.yaml; do \
+	    $(VALIDATOR) --extra-values "$(BASELINE),$$p" --include-sample-element --skip POLICY052,POLICY071 >> "$$acm" || failed=1; \
+	  done; \
+	  $(if $(CI),sort -u,cat) "$$acm"; rm -f "$$acm"; \
+	fi; \
+	if [ -n "$$(ls fleet/*.yaml fleet/hubs/*.yaml 2>/dev/null)" ]; then \
+	  $(VALIDATOR) --fixtures-dir fleet --extra-values $(BASELINE) $$skip || failed=1; \
+	fi; \
+	exit $$failed
+
+# Renders ELEMENT, turned on, for CLUSTER (default every fixture, or every fleet file where FIXTURES
+# doesn't exist) into a new directory, or PREVIEW (relative to tools/validator): <fleet file>/<element>.yaml holds the Policies and
+# <element>.evaluated.yaml the objects ACM applies on an empty cluster, ACM templates resolved.
+# Prints both when CLUSTER is set.
+preview: build
+	@test -n "$(ELEMENT)" || { echo "usage: make preview ELEMENT=<element> [CLUSTER=<fleet file>]"; exit 2; }
+	@dir=$${PREVIEW:-$$(mktemp -d)} && mkdir -p "$$dir" && dir=$$(cd "$$dir" && pwd) && \
+	enable=$$(mktemp) && trap 'rm -f "$$enable"' EXIT && \
+	key=$$(echo "$(ELEMENT)" | awk -F- '{printf "%s", $$1; for (i = 2; i <= NF; i++) printf "%s", toupper(substr($$i, 1, 1)) substr($$i, 2)}') && \
+	printf 'stack:\n  %s:\n    enabled: true\n' "$$key" > "$$enable" && \
+	cd $(ROOT) && failed=0; \
+	$(VALIDATOR) --extra-values "$(BASELINE),$$enable" --include-sample-element $(if $(CLUSTER),--cluster $(CLUSTER)) \
+	  $$([ -d $(FIXTURES) ] || echo --fixtures-dir fleet) --only RENDER000,POLICY081 --render-dir "$$dir" --evaluate || failed=1; \
+	find "$$dir" -name '*.yaml' | sort | $(if $(CLUSTER),xargs tail -n +1,cat); \
+	exit $$failed
+
+# test reads upstream's test data, which copier leaves out of a copy, so test and ci run upstream only.
+ci: lint validate test

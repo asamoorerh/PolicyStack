@@ -1,0 +1,62 @@
+stack:
+  userMonitoring:
+    enabled: false
+
+    # Retention and storage sizing, the values most likely to differ per cluster
+    config:
+      # Default StorageClass for every UWM component. Omit to use the cluster default.
+      storageClass: ""
+      prometheus:
+        # How long application metrics are kept
+        retention: 24h
+        # PVC size for each Prometheus replica
+        storage: 50Gi
+        # Override the StorageClass for Prometheus only
+        storageClass: ""
+        # Optional resource requests/limits
+        resources: {}
+        # Give each ServiceMonitor its own Prometheus shard
+        dedicatedServiceMonitors: false
+      thanosRuler:
+        # How long ruler data is kept
+        retention: 24h
+        # PVC size for each Thanos Ruler replica
+        storage: 10Gi
+        # Override the StorageClass for Thanos Ruler only
+        storageClass: ""
+        resources: {}
+      alertmanager:
+        # Run a dedicated Alertmanager for user workloads
+        enabled: false
+        # PVC size for each Alertmanager replica
+        storage: 10Gi
+        # Override the StorageClass for Alertmanager only
+        storageClass: ""
+        resources: {}
+
+    default:
+      remediationAction: enforce
+      severity: medium
+      categories:
+        - AU Audit and Accountability
+      controls:
+        - AU-6 Audit Review, Analysis, and Reporting
+      standards:
+        - NIST SP 800-53
+
+    policies:
+      config:
+        description: "Enable and configure User Workload Monitoring"
+        templates:
+          enable:
+            description: "Enable UWM and write its configuration"
+
+      ready:
+        description: "Reports NonCompliant until the UWM StatefulSets are ready"
+        # A status can only be observed, so this policy never enforces
+        remediationAction: inform
+        dependencies:
+          - name: config
+        templates:
+          statefulsets:
+            description: "UWM StatefulSet readiness"
