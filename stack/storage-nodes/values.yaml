@@ -1,0 +1,83 @@
+stack:
+  storageNodes:
+    enabled: false
+
+    config:
+      # Node role: names the MachineSets
+      role: storage
+      # Labels set on storage nodes
+      nodeLabels:
+        node-role.kubernetes.io/infra: ""
+        cluster.ocs.openshift.io/openshift-storage: ""
+      # Storage nodes per zone. ODF expects three for a supported topology.
+      replicas: 3
+      # AWS availability zones. Empty uses the zone of the cloned worker MachineSet.
+      zones: []
+      # AWS instance type. Empty inherits from the worker MachineSet.
+      instanceType: ""
+      # Root volume size in GiB. Empty inherits from the worker MachineSet.
+      volumeSize: ""
+      # vSphere vCPUs. Empty inherits from the worker MachineSet.
+      numCPUs: ""
+      # vSphere cores per socket. Empty inherits from the worker MachineSet.
+      numCoresPerSocket: ""
+      # vSphere memory in MiB. Empty inherits from the worker MachineSet.
+      memoryMiB: ""
+      # Bare metal only: node names to designate as storage. Empty takes the first
+      # `replicas` nodes instead.
+      nodes: []
+
+    default:
+      remediationAction: enforce
+      severity: medium
+      categories:
+        - CM Configuration Management
+      controls:
+        - CM-6 Configuration Settings
+      standards:
+        - NIST SP 800-53
+
+    # Exactly one platform policy should be enabled. Set it in values/platforms/<p>.yaml,
+    # listed in the cluster's fleet file.
+    policies:
+      # Create storage MachineSets by cloning the worker MachineSet (AWS)
+      aws:
+        enabled: false
+        description: "Storage MachineSets on AWS"
+        templates:
+          storage-machinesets:
+            description: "Storage MachineSets cloned from the worker MachineSet"
+
+      # Clone each worker MachineSet per vSphere failure domain
+      vmware:
+        enabled: false
+        description: "Storage MachineSets on vSphere"
+        templates:
+          storage-machinesets:
+            description: "Storage MachineSets per vSphere failure domain"
+
+      # Label existing nodes as storage nodes (no MachineSets on bare metal)
+      baremetal:
+        enabled: false
+        description: "Storage node labels on bare metal"
+        templates:
+          labels:
+            description: "Storage node labels"
+
+      # Report NonCompliant until the storage nodes are ready. odf and local-storage
+      # depend on this policy by name, so it is the readiness gate for the whole storage
+      # stack.
+      ready:
+        description: "Reports NonCompliant until the storage nodes are ready"
+        remediationAction: inform
+        templates:
+          storage-replicas:
+            description: "Storage MachineSet readiness"
+            remediationAction: InformOnly
+
+          # Readiness for the label-existing-nodes path, where no storage MachineSets
+          # exist and storage-replicas would report Compliant with nothing checked.
+          # Asserts that config.replicas nodes carry the storage label.
+          labeled-nodes:
+            description: "config.replicas nodes are designated for storage"
+            remediationAction: InformOnly

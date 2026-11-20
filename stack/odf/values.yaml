@@ -1,0 +1,146 @@
+stack:
+  odf:
+    enabled: false
+
+    config:
+      # StorageCluster name. ODF names its StorageClasses after it.
+      name: ocs-storagecluster
+      # balanced, lean or performance
+      resourceProfile: balanced
+      # StorageClass marked default cluster-wide. Every other class is marked non-default.
+      defaultStorageClass: ocs-storagecluster-ceph-rbd
+      # Allow OSDs to be unevenly distributed. Set true on bare metal when the storage node
+      # count is not a multiple of three. Leave unset to let ODF decide.
+      flexibleScaling: null
+      # Ceph CSI node-plugin tolerations are not managed. The field lives on csi.ceph.io
+      # OperatorConfig/ceph-csi-operator-config, owned by ceph-csi-operator; enforcing it caused an
+      # update/violation flap, and the operator honours it only when the Driver sets no tolerations.
+      # StorageCluster has no field for it: spec.placement excludes csi and spec.csi carries only
+      # readAffinity. The node plugin already runs on every schedulable node; tolerating extra
+      # taints is a per-cluster concern.
+
+      # Whether ODF runs the NooBaa multicloud gateway (manage or ignore)
+      multiCloudGateway: manage
+      # The disks backing Ceph
+      deviceSet:
+        # Device sets per replica
+        count: 2
+        # OSD replicas. Three is the supported topology.
+        replicas: 3
+        # PVC size per OSD
+        size: 2Ti
+        # StorageClass the OSD PVCs come from. With the local-storage element, point this at
+        # its LocalVolumeSet StorageClass and set size to "1" to consume whole devices.
+        storageClassName: gp3-csi
+      # Encryption at rest
+      encryption:
+        enabled: true
+        clusterWide: true
+        keyRotationSchedule: "@weekly"
+      network:
+        # Encrypt Ceph in-cluster traffic
+        encryptionEnabled: true
+      # NooBaa PV-pool sizing, used when the noobaa-pvpool template is enabled
+      noobaa:
+        numVolumes: 1
+        volumeSize: 500Gi
+        requests:
+          cpu: 500m
+          memory: 500Mi
+        limits:
+          cpu: 1000m
+          memory: 4000Mi
+
+    default:
+      remediationAction: enforce
+      severity: medium
+      categories:
+        - CP Contingency Planning
+        - SC System and Communications Protection
+      controls:
+        - CP-9 System Backup
+        - SC-28 Protection of Information at Rest
+      standards:
+        - NIST SP 800-53
+
+    policies:
+      install:
+        description: "Install and manage the ODF operator"
+
+      # The StorageCluster waits for dedicated storage nodes so OSDs land on them.
+      # Requires the storage-nodes element enabled on this cluster; the dependency
+      # below is satisfied only by a rendered policy. Dependencies have no switch: to
+      # run ODF without dedicated storage nodes, drop that dependency in your values.
+      cluster:
+        description: "Deploy the StorageCluster"
+        severity: high
+        dependencies:
+          - name: install
+          # Cross-element: the storage-nodes element on this same cluster
+          - name: ready
+            element: storage-nodes
+        templates:
+          storagecluster:
+            description: "StorageCluster and Ceph CSI placement"
+            waitForOperator: odf
+
+      ready:
+        description: "Reports NonCompliant until ODF has published its StorageClasses"
+        # Other elements depend on this policy by name; it is the "storage is usable" contract.
+        # It asserts StorageClasses, not StorageCluster conditions: every StorageCluster
+        # condition tracks live Ceph health, and a flapping ACM dependency puts every
+        # dependent policy into Pending. The `health` policy reports live health; nothing
+        # depends on it.
+        remediationAction: inform
+        dependencies:
+          - name: cluster
+        templates:
+          available:
+            description: "ODF StorageClasses exist"
+
+      # Live StorageCluster health, split out of `ready` so that its flapping cannot
+      # pause the five elements that depend on `ready`. Nothing depends on this one.
+      health:
+        description: "Reports live StorageCluster health"
+        remediationAction: inform
+        dependencies:
+          - name: ready
+        templates:
+          conditions:
+            description: "StorageCluster reports Available and not Degraded"
+
+      config:
+        description: "Default StorageClass, console plugin and NooBaa tuning"
+        dependencies:
+          - name: ready
+        templates:
+          storageclass:
+            description: "Default StorageClass selection"
+
+          console:
+            description: "ODF console plugin"
+            severity: low
+
+          # PV-pool backing store for NooBaa. Not needed when fronting a cloud object store.
+          noobaa-pvpool:
+            enabled: false
+            description: "NooBaa PV-pool backing store"
+
+          # Suppress the permanent NooBaa PodDisruptionBudgetAtLimit alert
+          pdb-alert:
+            description: "Suppress the NooBaa PDB alert"
+            severity: low
+
+    operatorPolicies:
+      odf:
+        description: "OpenShift Data Foundation operator"
+        displayName: "OpenShift Data Foundation"
+        namespace: openshift-storage
+        operatorGroup:
+          name: openshift-storage-operatorgroup
+          targetNamespaces:
+            - openshift-storage
+        subscription:
+          channel: stable-4.20
+          name: odf-operator
+        versions: []
